@@ -1,0 +1,21 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Heritage Inventory</title>
+  <link rel="stylesheet" href="{% static 'inventory.css' %}">
+</head>
+<body>
+<main class="login-wrap">
+  <section class="login-card">
+    <div class="brand">Heritage Inventory<small>OFFICE STOCK MANAGEMENT</small></div>
+    <h1>Welcome back</h1><p class="subtitle">Sign in to continue to your stock workspace.</p>
+    {% if form.non_field_errors %}<div class="message error">{{ form.non_field_errors }}</div>{% endif %}
+    {% if next %}<p class="footnote">Sign in to access the requested page.</p>{% endif %}
+    <form method="post">{% csrf_token %}{{ form.as_p }}<button class="button" style="width:100%">Sign in</button></form>
+    <p class="footnote" style="margin-top:18px">Access is managed by your system administrator.</p>
+  </section>
+</main>
+</body>
+</html>

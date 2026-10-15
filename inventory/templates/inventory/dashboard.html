@@ -1,0 +1,20 @@
+{% extends "inventory/base.html" %}
+{% load permissions %}
+{% block title %}Dashboard · {{ system_setting.company_name }}{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Dashboard</h1><p class="subtitle">A current view of your inventory and work waiting for attention.</p></div></div>
+<div class="grid stats">
+  <div class="card"><div class="stat-label">Active items</div><div class="stat-value">{% if can_view_items %}{{ item_count }}{% else %}—{% endif %}</div><div class="stat-note">in your stock scope</div></div>
+  <div class="card"><div class="stat-label">Units in stock</div><div class="stat-value">{% if can_view_stock %}{{ total_units }}{% else %}—{% endif %}</div><div class="stat-note">across active items</div></div>
+  <div class="card"><div class="stat-label">Purchases / requests / dispatches</div><div class="stat-value">{{ pending_purchases }} / {{ open_requests }} / {{ open_dispatches }}</div><div class="stat-note">waiting for action</div></div>
+  <div class="card"><div class="stat-label">Purchase spend this month</div><div class="stat-value">{{ purchase_spend|floatformat:2 }}</div><div class="stat-note">received items · usage {{ usage_units }} units</div></div>
+</div>
+<div class="grid split">
+  {% if can_view_items and can_view_stock %}<section class="card"><h2>Items at or below minimum</h2>
+    {% if low_stock %}<div class="scroll"><table><thead><tr><th>Item</th><th>On hand</th><th>Minimum</th></tr></thead><tbody>{% for item in low_stock %}<tr><td><a href="{% url 'items' %}">{{ item.name }}</a><div class="muted">{{ item.code }}</div></td><td><span class="badge{% if stock_by_item|item_at:item.pk == 0 %} danger{% else %} warning{% endif %}">{{ stock_by_item|item_at:item.pk }}</span></td><td>{{ item.min_stock }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">No low-stock items.</p>{% endif %}
+  </section>{% endif %}
+  {% if can_view_stock %}<section class="card"><h2>Recent movements</h2>
+    {% if recent_movements %}<div class="scroll"><table><thead><tr><th>When</th><th>Item</th><th>Change</th><th>Location</th><th>Type</th></tr></thead><tbody>{% for movement in recent_movements %}<tr><td>{{ movement.created_at|date:"M j, H:i" }}</td><td>{{ movement.item.name }}</td><td>{% if movement.quantity_change > 0 %}+{% endif %}{{ movement.quantity_change }}</td><td>{% if movement.in_transit %}In transit{% else %}{{ movement.branch.name|default:"—" }}{% endif %}</td><td>{{ movement.get_movement_type_display }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">No stock movements yet.</p>{% endif %}
+  </section>{% endif %}
+</div>
+{% endblock %}

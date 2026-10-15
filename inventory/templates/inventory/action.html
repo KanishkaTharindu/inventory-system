@@ -1,0 +1,5 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<div class="page-head"><div><h1>{{ title }}</h1><p class="subtitle">Submit the details below to record this action.</p></div><a class="button secondary" href="{% url back_url %}">Back</a></div>
+<section class="card" style="max-width:760px"><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Save</button></form></section>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "inventory/base.html" %}
+{% load permissions %}
+{% block content %}
+<div class="page-head"><div><h1>Items</h1><p class="subtitle">Manage the catalog and monitor quantities calculated from the movement ledger.</p></div></div>
+<div class="grid split">
+  {% if request.user|has_feature:"items.manage" %}
+  <section class="grid">
+    <div class="card"><h2>{% if editing %}Edit item{% else %}Add item{% endif %}</h2><p class="line-help">The item code is generated automatically if left blank.</p><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Save item</button>{% if editing %} <a class="button secondary" href="{% url 'items' %}">Cancel</a>{% endif %}</form></div>
+    <div class="card"><h2>Add category</h2><form method="post" action="{% url 'add_category' %}">{% csrf_token %}{{ category_form.as_p }}<button class="button secondary">Add category</button></form>
+      <div class="scroll" style="margin-top:12px"><table><thead><tr><th>Category</th><th>Status</th><th></th></tr></thead><tbody>{% for category in categories %}<tr><td>{{ category.name }}</td><td>{% if category.active %}Active{% else %}Inactive{% endif %}</td><td>{% if category.active %}<form method="post" action="{% url 'deactivate_category' category.pk %}">{% csrf_token %}<button class="button secondary small">Deactivate</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+    </div>
+  </section>
+  {% endif %}
+  <section class="card"><h2>Catalog</h2><div class="scroll"><table><thead><tr><th>Code / item</th><th>Category</th><th>Unit</th>{% if can_view_stock %}<th>On hand</th>{% endif %}<th>Minimum</th><th>Status</th><th></th></tr></thead><tbody>
+  {% for item in items %}<tr><td><strong>{{ item.code }}</strong><div>{{ item.name }}</div></td><td>{{ item.category.name }}</td><td>{{ item.unit }}</td>{% if can_view_stock %}<td>{{ stock_by_item|item_at:item.pk }}</td>{% endif %}<td>{{ item.min_stock }}</td><td>{% if not item.active %}<span class="badge">Inactive</span>{% elif not can_view_stock %}<span class="badge">Active</span>{% elif stock_by_item|item_at:item.pk == 0 %}<span class="badge danger">Out of stock</span>{% elif stock_by_item|item_at:item.pk <= item.min_stock %}<span class="badge warning">Low stock</span>{% else %}<span class="badge success">In stock</span>{% endif %}</td><td>{% if request.user|has_feature:"items.manage" %}{% if item.active %}<a class="button secondary small" href="?edit={{ item.pk }}">Edit</a><form method="post" action="{% url 'deactivate_item' item.pk %}" class="inline-form">{% csrf_token %}<button class="button secondary small">Deactivate</button></form>{% endif %}{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="7" class="empty">No items have been added.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+</div>
+{% endblock %}

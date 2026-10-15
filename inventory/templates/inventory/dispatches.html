@@ -1,0 +1,12 @@
+{% extends "inventory/base.html" %}
+{% load permissions %}
+{% block content %}
+<div class="page-head"><div><h1>Dispatches</h1><p class="subtitle">Track branch deliveries from main-office stock through final receipt and settlement.</p></div></div>
+<div class="grid split">
+  {% if form %}<section class="card"><h2>Send dispatch</h2><p class="line-help">Enter one active item per line as <code>ITEM-CODE, quantity</code>. Transit stock is tracked separately.</p><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Create dispatch</button></form></section>{% endif %}
+  <section class="card"><h2>Dispatch register</h2><div class="scroll"><table><thead><tr><th>Reference</th><th>Destination</th><th>Contents</th><th>Status</th><th>Action</th></tr></thead><tbody>
+  {% for dispatch in dispatches %}<tr><td><strong>{{ dispatch.reference }}</strong><div class="muted">{{ dispatch.dispatch_date }}</div></td><td>{{ dispatch.destination.name }}</td><td>{% for line in dispatch.lines.all %}{{ line.item.name }} × {{ line.quantity_sent }}{% if dispatch.status != "in_transit" %} (got {{ line.quantity_received }}, damaged {{ line.quantity_damaged }}, short {{ line.quantity_short }}){% endif %}{% if not forloop.last %}<br>{% endif %}{% endfor %}</td><td><span class="badge{% if dispatch.status == 'received' or dispatch.status == 'closed' %} success{% elif dispatch.status == 'received_with_differences' %} warning{% endif %}">{{ dispatch.get_status_display }}</span></td><td>{% if dispatch.status == "in_transit" and request.user|has_feature:"dispatches.receive" %}<a class="button small" href="{% url 'dispatch_receive' dispatch.pk %}">Record receipt</a>{% elif dispatch.status == "received_with_differences" and request.user|has_feature:"dispatches.manage" %}<form method="post" action="{% url 'dispatch_close' dispatch.pk %}">{% csrf_token %}<label><input type="checkbox" name="return_to_stock" value="yes"> Return difference to main stock</label><button class="button secondary small">Settle & close</button></form>{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="5" class="empty">No dispatches found.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "inventory/base.html" %}
+{% load permissions %}
+{% block content %}
+<div class="page-head"><div><h1>Branch requests</h1><p class="subtitle">Branch teams request stock; main office users approve each line.</p></div></div>
+<div class="grid split">
+  {% if form %}<section class="card"><h2>New request</h2><p class="line-help">Enter one active item per line as <code>ITEM-CODE, quantity</code>.</p><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Submit request</button></form></section>{% endif %}
+  <section class="card"><h2>Request register</h2><div class="scroll"><table><thead><tr><th>Request</th><th>Branch</th><th>Requested items</th><th>Status</th><th>Action</th></tr></thead><tbody>
+  {% for req in requests %}<tr><td><strong>{{ req.number }}</strong><div class="muted">{{ req.created_at|date:"M j, Y" }}</div></td><td>{{ req.branch.name }}</td><td>{% for line in req.lines.all %}{{ line.item.name }} × {{ line.quantity_requested }} (approved {{ line.quantity_approved }}){% if not forloop.last %}<br>{% endif %}{% endfor %}</td><td><span class="badge{% if req.status == 'rejected' or req.status == 'cancelled' %} danger{% elif req.status == 'submitted' or req.status == 'partly_approved' %} warning{% else %} success{% endif %}">{{ req.get_status_display }}</span></td><td class="actions">{% if req.status == "submitted" and request.user|has_feature:"requests.review" %}<a class="button small" href="{% url 'request_review' req.pk %}">Review</a>{% endif %}{% if req.status == "submitted" and req.branch_id == request.user.branch_id and request.user|has_feature:"requests.create" %}<form method="post" action="{% url 'request_cancel' req.pk %}" class="inline-form">{% csrf_token %}<button class="button secondary small">Cancel</button></form>{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="5" class="empty">No requests found.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+</div>
+{% endblock %}

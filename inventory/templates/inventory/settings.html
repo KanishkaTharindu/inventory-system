@@ -1,0 +1,6 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<div class="page-head"><div><h1>Settings</h1><p class="subtitle">Set the company name and enable optional system modules.</p></div></div>
+<section class="card" style="max-width:720px"><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Save settings</button></form>
+<p class="footnote" style="margin-top:18px">The branch module cannot be turned off while requests or dispatches are awaiting action.</p></section>
+{% endblock %}

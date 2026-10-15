@@ -1,0 +1,12 @@
+{% extends "inventory/base.html" %}
+{% load permissions %}
+{% block content %}
+<div class="page-head"><div><h1>Office issues</h1><p class="subtitle">Issue supplies to staff or departments. Cancelling creates stock-reversal movements.</p></div></div>
+<div class="grid split">
+  {% if request.user|has_feature:"issues.manage" %}<section class="card"><h2>Issue stock</h2><p class="line-help">Enter one item per line as <code>ITEM-CODE, quantity</code>. Stock is checked before saving.</p><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button">Record issue</button></form></section>{% endif %}
+  <section class="card"><h2>Issue register</h2><div class="scroll"><table><thead><tr><th>Issue</th><th>Recipient</th><th>Location</th><th>Items</th><th>Status</th><th></th></tr></thead><tbody>
+  {% for issue in issues %}<tr><td><strong>{{ issue.number }}</strong><div class="muted">{{ issue.issue_date }}</div></td><td>{{ issue.recipient }}<div class="muted">{{ issue.department }}</div></td><td>{{ issue.branch.name|default:"Main office" }}</td><td>{% for line in issue.lines.all %}{{ line.item.name }} × {{ line.quantity }}{% if not forloop.last %}<br>{% endif %}{% endfor %}</td><td><span class="badge{% if issue.status == 'cancelled' %} danger{% else %} success{% endif %}">{{ issue.get_status_display }}</span></td><td>{% if issue.status == "issued" and request.user|has_feature:"issues.manage" %}<form method="post" action="{% url 'issue_cancel' issue.pk %}">{% csrf_token %}<input name="reason" placeholder="Cancellation reason" required minlength="3"><button class="button secondary small" style="margin-top:5px">Cancel / restore</button></form>{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="6" class="empty">No office issues recorded.</td></tr>{% endfor %}
+  </tbody></table></div></section>
+</div>
+{% endblock %}
