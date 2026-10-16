@@ -1,128 +1,146 @@
-# Heritage Inventory System
+# Office Stock System (Django)
 
-A Django application for managing office supplies, purchases, staff issues, branch requests,
-dispatches, stock movements, reports, users, roles, and audit history. The application uses
-server-rendered Django pages and SQLite by default; it does not require Node.js or MongoDB.
+A Django port of the Heritage Office Stock System (formerly Express + MongoDB + React). One server-rendered
+Django project, no separate API or front-end build.
 
-## Requirements
+## Quick start (local)
 
-- Python 3.10 or newer
-- pip
-
-## Run locally on Windows
-
-Open PowerShell in the repository folder and run:
+**Windows (PowerShell, e.g. the VS Code terminal):**
 
 ```powershell
-py -3 -m pip install -r requirements.txt
-py -3 manage.py migrate
-py -3 manage.py seed_system
-py -3 manage.py createsuperuser
-py -3 manage.py runserver
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1    # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -r requirements.txt
+Copy-Item .env.example .env     # then edit it: set SEED_ADMIN_PASSWORD at least
+python manage.py makemigrations core accounts catalog inventory branchops pettycash
+python manage.py migrate
+python manage.py seed           # main office, first Super Admin, starter categories, default roles
+python manage.py runserver
 ```
 
-If the Python launcher is unavailable, install with `python -m pip install -r requirements.txt`
-and replace `py -3 manage.py` with `python manage.py` for the Django commands. Open
-<http://127.0.0.1:8000> and sign in with the Super Admin created by `createsuperuser`.
+**macOS / Linux (bash):**
 
-`seed_system` creates the protected main office (`NUG`), starter categories, the initial
-settings record, and the three editable default roles: Stock Officer, Viewer / Approver, and
-Branch User. It is safe to run again. Create the Super Admin separately so no default password
-is ever installed.
-
-For unattended setup, set both `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` before running
-`py -3 manage.py seed_system`. The password must be at least 10 characters. Keep secrets out of
-source control.
-
-## Main modules
-
-- **Dashboard** — low-stock items, stock totals, monthly received-purchase spend, pending
-  requests and dispatches, and recent movements.
-- **Items and categories** — catalog, generated `ITM-0001`-style codes, units, minimum levels,
-  cost, and low/out-of-stock indicators.
-- **Suppliers and purchases** — record orders, receive whole or partial deliveries, and cancel
-  only orders that have not been received.
-- **Office issues** — issue supplies to a person or department and cancel an issue through
-  compensating stock movements.
-- **Branch requests and dispatches** — submit and review line-by-line requests; dispatch
-  approved quantities, record branch receipts, and settle damaged or missing goods.
-- **Stock and movements** — per-location balances, the last 30 days of movement detail,
-  in-transit quantities, and signed corrections.
-- **Reports** — stock/value, received purchases, office usage, and dispatch reports, each
-  downloadable as CSV.
-- **Administration** — manage branches, users, custom roles and per-user permissions; set the
-  company name and branch/audit switches; inspect or clear audit entries for an explicit date
-  range.
-
-Every user can change their own password from the top bar. Super Admin-only settings and
-administration pages are not exposed to ordinary users.
-
-## Stock and access rules
-
-1. Stock on hand is calculated as the sum of append-only ledger movements. The system never
-   accepts a directly typed balance.
-2. Receipts, issues, dispatches, receipt confirmations, and corrections write their related
-   records and ledger movements inside database transactions.
-3. Ordinary stock removals are rejected if they would make a location's quantity negative.
-4. Cancelling an office issue writes compensating movement rows linked to the originals;
-   existing movement history is not edited.
-5. A dispatch moves stock from the main office to an in-transit location. Branch receipt moves
-   only confirmed quantities into branch stock. Differences remain in transit until settled.
-6. Catalog and branch records are deactivated rather than removed after use. Main-office
-   records cannot be deactivated or converted into branches.
-7. Branch-side users are restricted to their assigned branch by server-side query and workflow
-   checks; the branch module must be enabled before requests or dispatches can be used.
-8. The system prevents deactivating the currently signed-in user and the last active Super
-   Admin.
-9. Audit history is append-only in application workflows. Only a Super Admin can clear an
-   explicitly selected date range.
-
-## Roles and permissions
-
-Roles have a side (main office or branch) and a set of feature permissions. A user's assigned
-permissions can be customized independently of the role defaults. The built-in Super Admin
-always has full access. The default Branch User role is limited to creating requests and
-receiving dispatches. The branch module is disabled until enabled in Settings.
-
-## Project structure
-
-```text
-config/                 Django settings, root URLs, WSGI and ASGI
-inventory/
-  management/commands/  idempotent system seed command
-  migrations/           database schema
-  templates/            server-rendered pages
-  forms.py              input validation and forms
-  models.py             users, catalog, workflows and stock ledger
-  services.py           transactional inventory business rules
-  urls.py               application routes
-  views.py              authentication, pages and workflows
-static/                 application styles
-manage.py               Django command-line entry point
-requirements.txt        Python dependencies
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env            # then edit it: set SEED_ADMIN_PASSWORD at least
+python manage.py makemigrations core accounts catalog inventory branchops pettycash
+python manage.py migrate
+python manage.py seed           # main office, first Super Admin, starter categories, default roles
+python manage.py runserver
 ```
 
-## Configuration and maintenance
+Sign in at http://127.0.0.1:8000/ with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`.
 
-The default database is `db.sqlite3` in the repository root. Set `DJANGO_DB_PATH` to use a
-different SQLite file. Other environment settings:
+> **Migrations are not included.** They must be generated once with the `makemigrations` line above
+> (in this order of apps it resolves the dependencies for you). Commit the generated `*/migrations/0001_initial.py`
+> files afterwards so every environment uses the same schema.
+
+## Sample data (development only)
+
+Needs `DJANGO_DEBUG=true` in `.env` and a Super Admin (`python manage.py seed` has already made one).
+
+**Load 5 sample records of every kind** (5 branches, 5 users, 5 suppliers, 5 items, 5 purchases, 5 branch requests,
+5 dispatches, 5 office issues, 5 petty cash requests, plus the starter categories). It goes through the app's own rules, so stock,
+petty cash balances and the audit log are consistent. Main-office work is recorded as the Super Admin; the 5 demo
+branch users sign in with `<name>@example.test` and the password `HeritageDemo!2026` (set `SAMPLE_USER_PASSWORD` to change it).
+
+```powershell
+# Windows PowerShell (from the project folder, venv activated or not)
+.\scripts\load_sample_data.ps1
+# or directly:
+python manage.py seed_sample_data
+```
+
+**Clear everything except the Super Admin.** Deletes all documents, stock, petty cash, audit entries, items, categories,
+suppliers, demo users and branches. Keeps the Super Admin account(s), the main office, roles and settings. It asks you to
+type the database file name (for example `db.sqlite3`) before deleting; `--yes` skips the question.
+
+```powershell
+.\scripts\clear_all_data.ps1
+# or directly:
+python manage.py clear_all_data
+```
+
+To start the demo over: clear, then load again. Loading twice without clearing is refused, so nothing is duplicated.
+If PowerShell blocks the `.ps1` files, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use the `python manage.py` lines.
+
+Run the tests:
+
+```bash
+python manage.py test                              # needs Django
+PYTHONPATH=. python -m unittest core.tests.test_rules   # pure business rules, no Django needed
+```
+
+PowerShell equivalent for the pure-rules test:
+
+```powershell
+$env:PYTHONPATH = "."
+python -m unittest core.tests.test_rules
+```
+
+## Configuration (`.env`)
 
 | Variable | Purpose |
-|---|---|
-| `DJANGO_SECRET_KEY` | Secret key; set a private random value outside local development |
-| `DJANGO_DEBUG` | Debug mode (`true` locally; set `false` when deployed) |
-| `DJANGO_ALLOWED_HOSTS` | Comma-separated host names allowed to serve the application |
-| `DJANGO_TIME_ZONE` | Time zone (defaults to `Asia/Colombo`) |
+| --- | --- |
+| `DJANGO_SECRET_KEY` | Required unless `DJANGO_DEBUG=true`. |
+| `DJANGO_DEBUG` | `true` for local development only. |
+| `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` | Hosts and full origins (with `https://`) when deployed. |
+| `TIME_ZONE` | Default `Asia/Colombo`. Dates and reports use this zone. |
+| `DB_ENGINE` | `sqlite` (default) or `postgres` (+ `DB_NAME/USER/PASSWORD/HOST/PORT`). |
+| `CRON_SECRET` | Bearer secret for the daily 30-day cleanup URL. |
+| `SEED_ADMIN_*`, `SEED_COMPANY_NAME` | Used by `manage.py seed`. |
 
-Useful commands:
+## Deploying
 
-```powershell
-py -3 manage.py check
-py -3 manage.py test
-py -3 manage.py makemigrations
-py -3 manage.py migrate
-py -3 manage.py seed_system
+`gunicorn config.wsgi` behind HTTPS; static files are served by WhiteNoise (`python manage.py collectstatic`).
+With `DJANGO_DEBUG` off, secure cookies, HSTS and the SSL redirect are on.
+
+**Daily stock-movement cleanup.** Schedule a request every day (the original ran at 00:15):
+
+```
+GET /maintenance/stock-ledger-retention/
+Authorization: Bearer <CRON_SECRET>
 ```
 
-Before deploying, set a secure `DJANGO_SECRET_KEY`, disable debug mode, set the allowed hosts,
-configure HTTPS, and review the database and backup strategy for the deployment environment.
+or run `python manage.py prune_stock_movements` from cron (Task Scheduler on Windows). To test the URL from PowerShell:
+`Invoke-WebRequest -Headers @{Authorization="Bearer <CRON_SECRET>"} http://127.0.0.1:8000/maintenance/stock-ledger-retention/`. Movements older than 30 days are replaced by one
+"opening balance" row per item and location, so stock levels never change.
+
+## Management commands
+
+| Command | What it does |
+| --- | --- |
+| `seed` | Idempotent first-run setup. |
+| `seed_sample_data` | 5 fictional records of every kind, including petty cash (dev only). |
+| `clear_all_data` | Deletes everything except the Super Admin(s), main office, roles and settings (dev only; asks for the database name, `--yes` skips). |
+| `clear_app_data` | Lighter clean-up: wipes catalog, stock, documents, audit and counters but keeps all users, roles, branches, settings. Dev only; you must type the database name. |
+| `prune_stock_movements` | Runs the 30-day cleanup now. |
+
+## Where things live
+
+| App | Contents |
+| --- | --- |
+| `core` | Settings, audit log, dashboard, CSV, permissions/labels, **pure business rules** (`core/rules`, no Django imports), middleware, template tags |
+| `accounts` | Users, roles, branches, sign-in with lockout, change/reset password |
+| `catalog` | Items, categories, suppliers |
+| `inventory` | Ledger, purchases (partial receiving), office issues (cancel by reversal), stock page, corrections, 30-day cleanup |
+| `branchops` | Branch requests with review, dispatches with receive/close |
+| `pettycash` | Petty cash for the main office and every branch: requests, manager approval, spending, cash book, low-cash level |
+| `reports` | Current stock, purchases, usage, dispatches; CSV and print |
+
+## Petty cash
+
+Open **Petty Cash** in the menu. The main office and every branch hold their own petty cash for buying inventory items.
+
+1. A user with *Own petty cash* (`petty_cash.request`) raises a request for an amount.
+2. A manager with *Petty cash: Approve requests* (`petty_cash.approve`) approves it (optionally a smaller amount, with a reason) or rejects it.
+   Approval means the money was handed over, so the branch balance goes up. Nobody but the Super Admin can approve their own request.
+3. The branch records what it spends (*Record spending*); spending cannot exceed the balance and a mistake is cancelled by a reversal.
+4. A branch is **low** when its balance is at or below the low level (default Rs. 2,000). Users with *Set the low level*
+   (`petty_cash.configure`) change it under Petty Cash → Low level.
+
+Tick these features on a role or user under Roles / Users. Existing roles are not changed automatically; create e.g. a "Manager" role
+with *Approve requests* and *Set the low level* ticked. Run `python manage.py migrate` after pulling this change.
+
+See `MIGRATION_NOTES.md` for behaviour that differs from the original and for moving existing data.

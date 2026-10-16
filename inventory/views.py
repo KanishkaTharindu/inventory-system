@@ -1,913 +1,420 @@
-import csv
-from datetime import date
-from datetime import timedelta
-from functools import wraps
+import json
+from datetime import datetime, time
+from decimal import Decimal
 
 from django.contrib import messages
-from django.contrib.auth import update_session_auth_hash
-from django.contrib.auth.decorators import login_required
-from django.contrib.auth.forms import SetPasswordForm
-from django.contrib.auth.views import LoginView, PasswordChangeView
-from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Sum
-from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse_lazy
+from django.core.paginator import Paginator
+from django.db.models import Q
+from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from .forms import (
-    BranchForm,
-    CancelForm,
-    CategoryForm,
-    DispatchForm,
-    DispatchReceiptForm,
-    IssueForm,
-    ItemForm,
-    PurchaseForm,
-    ReceivePurchaseForm,
-    RequestForm,
-    ReviewRequestForm,
-    RoleForm,
-    SettingsForm,
-    SignInForm,
-    StockAdjustmentForm,
-    SupplierForm,
-    UserCreateForm,
-    UserEditForm,
-)
-from .models import (
-    AuditLog,
-    Branch,
-    Category,
-    Dispatch,
-    DispatchLine,
-    IssueLine,
-    Item,
-    OfficeIssue,
-    PurchaseLine,
-    Role,
-    StockLedger,
-    StockRequest,
-    Supplier,
-    SupplierPurchase,
-    SystemSetting,
-    User,
-)
-from .services import (
-    WorkflowError,
-    adjust_stock,
-    balances_for,
-    cancel_issue,
-    cancel_purchase,
-    cancel_request,
-    close_dispatch,
-    create_dispatch,
-    create_issue,
-    create_purchase,
-    create_request,
-    get_balance,
-    main_branch,
-    next_number,
-    receive_dispatch,
-    receive_purchase,
-    review_request,
-)
+from accounts.models import Branch
+from catalog.models import Item, Supplier
+from core.constants import LEDGER_TYPES, PURCHASE_STATUS
+from core.decorators import permission_required
+from core.errors import ServiceError
+from core.forms import apply_service_error
+from core.labels import (ISSUE_STATUS_LABELS, MOVEMENT_TYPES, PURCHASE_STATUS_LABELS, REASON_LABELS, REASONS_FOR)
+from core.lines import parse_lines, parse_pairs, whole_number
+from core.permissions import has_any, is_branch_side
+from core.rules.issue_rules import total_units
+from core.rules.purchase_rules import has_receipts, purchase_total
+from core.rules.report_rules import parse_range
+from inventory import forms as inv_forms
+from inventory.models import OfficeIssue, Purchase, StockLedger
+from inventory.services import adjustments, issues, purchases
+from inventory.services.stock import get_balances, get_main_branch
+
+PAGE_SIZE = 50
+BLANK_ROW = {'item_id': '', 'errors': {}, 'raw': {'item': '', 'quantity': '', 'unit_cost': ''}}
 
 
-def feature_required(feature):
-    def decorate(view):
-        @wraps(view)
-        @login_required
-        def wrapped(request, *args, **kwargs):
-            if not request.user.has_feature(feature):
-                raise PermissionDenied
-            return view(request, *args, **kwargs)
-
-        return wrapped
-
-    return decorate
+def _day_bounds(range_):
+    tz = timezone.get_current_timezone()
+    start = timezone.make_aware(datetime.combine(range_['from'], time.min), tz) if range_.get('from') else None
+    end = timezone.make_aware(datetime.combine(range_['to'], time.max), tz) if range_.get('to') else None
+    return start, end
 
 
-def superuser_required(view):
-    @wraps(view)
-    @login_required
-    def wrapped(request, *args, **kwargs):
-        if not request.user.is_superuser:
-            raise PermissionDenied
-        return view(request, *args, **kwargs)
-
-    return wrapped
+def _date_range(request):
+    """(from_text, to_text, range, problem). A bad date is shown as an error rather than ignored."""
+    f, t = request.GET.get('from', ''), request.GET.get('to', '')
+    r = parse_range(f, t)
+    return f, t, r, r.get('problem')
 
 
-def main_side_required(view):
-    @wraps(view)
-    def wrapped(request, *args, **kwargs):
-        if request.user.side == Branch.BRANCH:
-            raise PermissionDenied
-        return view(request, *args, **kwargs)
-
-    return wrapped
-
-
-def audit(request, action, record=None, old_value=None, new_value=None):
-    from .services import log_audit
-
-    ip = request.META.get("REMOTE_ADDR")
-    log_audit(request.user, action, record, old_value, new_value, ip)
+def _item_options(user, only_in_stock=False):
+    """Active items with their stock at the user's own branch (main office for main-side users)."""
+    items = list(Item.objects.filter(active=True).order_by('name'))
+    branch_id = user.branch_id if is_branch_side(user) else (get_main_branch().pk if get_main_branch() else None)
+    balances = get_balances(branch_id, [i.pk for i in items])
+    for i in items:
+        i.stock = balances.get(i.pk, 0)
+    return [i for i in items if i.stock > 0] if only_in_stock else items
 
 
-def safe_csv(value):
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
-        return f"'{value}"
-    return value
-
-
-def handle_workflow(request, action, *args, **kwargs):
-    try:
-        return action(*args, **kwargs)
-    except (WorkflowError, ValidationError) as exc:
-        messages.error(request, " ".join(exc.messages) if hasattr(exc, "messages") else str(exc))
-        return None
-
-
-def branch_queryset_for_user(user, queryset, field="branch"):
-    if user.side == Branch.BRANCH:
-        return queryset.filter(**{f"{field}_id": user.branch_id})
-    return queryset
-
-
-class InventoryLoginView(LoginView):
-    template_name = "registration/login.html"
-    authentication_form = SignInForm
-    redirect_authenticated_user = True
-
-
-@login_required
-def dashboard(request):
-    branch = request.user.branch if request.user.side == Branch.BRANCH else None
-    can_view_items = request.user.has_feature("items.view")
-    can_view_stock = request.user.has_feature("stock.view")
-    can_view_requests = request.user.has_feature("requests.review") or request.user.has_feature("requests.create")
-    can_view_dispatches = request.user.has_feature("dispatches.manage") or request.user.has_feature("dispatches.receive")
-    rows = balances_for(branch=branch)
-    all_items = list(Item.objects.filter(active=True)) if can_view_items else []
-    stock_by_item = {}
-    for item in all_items:
-        stock_by_item[item.pk] = sum(
-            qty for (item_id, _branch_id, transit), qty in rows.items()
-            if item_id == item.pk and not transit
-        )
-    low_stock = [
-        item for item in all_items
-        if stock_by_item[item.pk] <= item.min_stock
-    ]
-    today = timezone.localdate()
-    purchases = SupplierPurchase.objects.filter(
-        purchase_date__year=today.year, purchase_date__month=today.month
-    )
-    open_purchases = SupplierPurchase.objects.filter(
-        status__in=[SupplierPurchase.ORDERED, SupplierPurchase.PARTLY_RECEIVED]
-    )
-    issue_lines = IssueLine.objects.filter(
-        issue__status=OfficeIssue.OPEN,
-        issue__issue_date__year=today.year,
-        issue__issue_date__month=today.month,
-    )
-    if branch:
-        purchases = purchases.filter(branch=branch)
-        open_purchases = open_purchases.filter(branch=branch)
-        issue_lines = issue_lines.filter(issue__branch=branch)
-    purchase_spend = sum(
-        line.quantity_received * line.unit_cost
-        for line in PurchaseLine.objects.filter(purchase__in=purchases).select_related("purchase")
-    )
-    requests = StockRequest.objects.all()
-    dispatches = Dispatch.objects.all()
-    if branch:
-        requests = requests.filter(branch=branch)
-        dispatches = dispatches.filter(destination=branch)
-    movement_queryset = StockLedger.objects.none()
-    if can_view_stock:
-        movement_queryset = StockLedger.objects.select_related(
-            "item", "branch", "created_by"
-        ).exclude(movement_type=StockLedger.OPENING_BALANCE)
-        if branch:
-            movement_queryset = movement_queryset.filter(branch=branch)
-    usage_units = issue_lines.aggregate(total=Sum("quantity"))["total"] or 0
-    if not request.user.has_feature("issues.view"):
-        usage_units = 0
-    context = {
-        "low_stock": low_stock[:8],
-        "stock_by_item": stock_by_item,
-        "item_count": len(all_items),
-        "total_units": sum(stock_by_item.values()),
-        "can_view_items": can_view_items,
-        "can_view_stock": can_view_stock,
-        "purchase_spend": purchase_spend if request.user.has_feature("purchases.view") else 0,
-        "usage_units": usage_units,
-        "pending_purchases": open_purchases.count() if request.user.has_feature("purchases.view") else 0,
-        "open_requests": requests.filter(
-            status__in=[StockRequest.SUBMITTED, StockRequest.APPROVED, StockRequest.PARTLY_APPROVED]
-        ).count() if can_view_requests else 0,
-        "open_dispatches": dispatches.filter(
-            status__in=[Dispatch.IN_TRANSIT, Dispatch.RECEIVED_WITH_DIFFERENCES]
-        ).count() if can_view_dispatches else 0,
-        "recent_movements": movement_queryset[:10],
+# ================================================================== purchases
+def _purchase_view_model(p):
+    lines = list(p.lines.all())
+    return {
+        'p': p, 'lines': lines, 'total': purchase_total(lines),
+        'total_ordered': sum(l.quantity_ordered for l in lines),
+        'total_received': sum(l.quantity_received or 0 for l in lines),
     }
-    return render(request, "inventory/dashboard.html", context)
 
 
-@feature_required("items.view")
-def items(request):
-    item_id = request.GET.get("edit")
-    item = get_object_or_404(Item, pk=item_id) if item_id else None
-    form = ItemForm(request.POST or None, instance=item)
-    if request.method == "POST":
-        if not request.user.has_feature("items.manage"):
-            raise PermissionDenied
-        if form.is_valid():
-            item = form.save(commit=False)
-            if not item.code:
-                item.code = next_number("ITM")
-            item.save()
-            audit(request, "item.update" if item else "item.create", item)
-            messages.success(request, f"Saved {item.name}.")
-            return redirect("items")
-    item_list = Item.objects.select_related("category").all()
-    can_view_stock = request.user.has_feature("stock.view")
-    rows = balances_for(
-        branch=request.user.branch if request.user.side == Branch.BRANCH else None
-    ) if can_view_stock else {}
-    stock_by_item = {
-        item.pk: sum(qty for (item_id, _branch_id, transit), qty in rows.items() if item_id == item.pk and not transit)
-        for item in item_list
-    }
-    return render(request, "inventory/items.html", {
-        "items": item_list, "stock_by_item": stock_by_item, "form": form,
-        "categories": Category.objects.all(),
-        "category_form": CategoryForm(),
-        "editing": item,
-        "can_view_stock": can_view_stock,
-    })
+@permission_required('purchases.view')
+def purchase_list(request):
+    g = request.GET
+    search, status, supplier = g.get('q', '').strip(), g.get('status', ''), g.get('supplier', '')
+    f, t, rng, problem = _date_range(request)
+    qs = Purchase.objects.select_related('supplier', 'branch', 'created_by').prefetch_related('lines')
+    if is_branch_side(request.user):
+        qs = qs.filter(branch_id=request.user.branch_id)
+    if status in PURCHASE_STATUS_LABELS:
+        qs = qs.filter(status=status)
+    if supplier.isdigit():
+        qs = qs.filter(supplier_id=int(supplier))
+    if search:
+        qs = qs.filter(Q(number__icontains=search) | Q(invoice_ref__icontains=search) | Q(supplier__name__icontains=search))
+    if not problem:
+        if rng.get('from'):
+            qs = qs.filter(purchase_date__gte=rng['from'])
+        if rng.get('to'):
+            qs = qs.filter(purchase_date__lte=rng['to'])
+    rows = [_purchase_view_model(p) for p in qs.order_by('-purchase_date', '-created_at')]
+    spent = sum((r['total'] for r in rows if r['p'].status != PURCHASE_STATUS.CANCELLED), Decimal(0))
+    return render(request, 'inventory/purchase_list.html', {
+        'rows': rows, 'spent': spent, 'problem': problem, 'suppliers': Supplier.objects.order_by('name'),
+        'statuses': PURCHASE_STATUS_LABELS, 'f': {'q': search, 'status': status, 'supplier': supplier, 'from': f, 'to': t},
+        'filters_on': any([search, status, supplier, f, t]), 'show_branch': not is_branch_side(request.user),
+        'can_manage': has_any(request.user, ['purchases.manage'])})
 
 
-@feature_required("items.manage")
-@require_POST
-def add_category(request):
-    form = CategoryForm(request.POST)
-    if form.is_valid():
-        category = form.save()
-        audit(request, "category.create", category)
-        messages.success(request, "Category added.")
-    else:
-        messages.error(request, form.errors.as_text())
-    return redirect("items")
+@permission_required('purchases.view')
+def purchase_detail(request, pk):
+    p = purchases.get_purchase(request.user, pk)
+    vm = _purchase_view_model(p)
+    open_ = p.status in (PURCHASE_STATUS.ORDERED, PURCHASE_STATUS.PARTLY_RECEIVED)
+    return render(request, 'inventory/purchase_detail.html', {
+        **vm, 'open': open_, 'has_receipts': has_receipts(vm['lines']), 'cancelled': p.status == PURCHASE_STATUS.CANCELLED,
+        'show_branch_name': not is_branch_side(request.user),
+        'can_manage': has_any(request.user, ['purchases.manage']), 'can_receive': has_any(request.user, ['purchases.receive'])})
 
 
-@feature_required("items.manage")
-@require_POST
-def deactivate_category(request, category_id):
-    category = get_object_or_404(Category, pk=category_id)
-    category.active = False
-    category.save(update_fields=["active"])
-    audit(request, "category.deactivate", category)
-    messages.success(request, f"{category.name} was deactivated.")
-    return redirect("items")
+def _line_rows_from_purchase(p):
+    return [{'item_id': l.item_id, 'errors': {}, 'raw': {'item': str(l.item_id), 'quantity': str(l.quantity_ordered),
+                                                       'unit_cost': f'{l.unit_cost:.2f}'}} for l in p.lines.all()]
 
 
-@feature_required("items.manage")
-@require_POST
-def deactivate_item(request, item_id):
-    item = get_object_or_404(Item, pk=item_id)
-    item.active = False
-    item.save(update_fields=["active"])
-    audit(request, "item.deactivate", item)
-    messages.success(request, f"{item.name} was deactivated.")
-    return redirect("items")
-
-
-@feature_required("suppliers.view")
-def suppliers(request):
-    supplier_id = request.GET.get("edit")
-    supplier = get_object_or_404(Supplier, pk=supplier_id) if supplier_id else None
-    form = SupplierForm(request.POST or None, instance=supplier)
-    if request.method == "POST":
-        if not request.user.has_feature("suppliers.manage"):
-            raise PermissionDenied
-        if form.is_valid():
-            supplier = form.save()
-            audit(request, "supplier.update" if supplier else "supplier.create", supplier)
-            messages.success(request, "Supplier saved.")
-            return redirect("suppliers")
-    return render(request, "inventory/suppliers.html", {
-        "suppliers": Supplier.objects.all(), "form": form, "editing": supplier,
-    })
-
-
-@feature_required("suppliers.manage")
-@require_POST
-def deactivate_supplier(request, supplier_id):
-    supplier = get_object_or_404(Supplier, pk=supplier_id)
-    supplier.active = False
-    supplier.save(update_fields=["active"])
-    audit(request, "supplier.deactivate", supplier)
-    messages.success(request, f"{supplier.name} was deactivated.")
-    return redirect("suppliers")
-
-
-@feature_required("purchases.view")
-@main_side_required
-def purchases(request):
-    form = PurchaseForm(request.POST or None)
-    if request.method == "POST":
-        if not request.user.has_feature("purchases.manage"):
-            raise PermissionDenied
-        if form.is_valid():
-            purchase = handle_workflow(
-                request,
-                create_purchase,
-                supplier=form.cleaned_data["supplier"],
-                purchase_date=form.cleaned_data["purchase_date"],
-                invoice_ref=form.cleaned_data["invoice_ref"],
-                notes=form.cleaned_data["notes"],
-                lines=form.cleaned_data["lines"],
-                user=request.user,
-            )
-            if purchase:
-                messages.success(request, f"Purchase {purchase.number} recorded.")
-                return redirect("purchases")
-    return render(request, "inventory/purchases.html", {
-        "purchases": SupplierPurchase.objects.select_related("supplier", "created_by").prefetch_related("lines__item"),
-        "form": form,
-    })
-
-
-@feature_required("purchases.receive")
-@main_side_required
-def purchase_receive(request, purchase_id):
-    purchase = get_object_or_404(SupplierPurchase, pk=purchase_id)
-    form = ReceivePurchaseForm(purchase, request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        result = handle_workflow(
-            request, receive_purchase, purchase_id=purchase.pk,
-            quantities=form.quantities(), user=request.user,
-        )
-        if result:
-            messages.success(request, f"Received items for {purchase.number}.")
-            return redirect("purchases")
-    return render(request, "inventory/action.html", {
-        "title": f"Receive {purchase.number}", "form": form, "back_url": "purchases",
-    })
-
-
-@feature_required("purchases.manage")
-@main_side_required
-@require_POST
-def purchase_cancel(request, purchase_id):
-    result = handle_workflow(request, cancel_purchase, purchase_id=purchase_id, user=request.user)
-    if result:
-        messages.success(request, f"Purchase {result.number} cancelled.")
-    return redirect("purchases")
-
-
-@feature_required("issues.view")
-def issues(request):
-    form = IssueForm(request.POST or None, user=request.user)
-    if request.user.side == Branch.BRANCH:
-        form.fields["branch"].queryset = Branch.objects.filter(pk=request.user.branch_id)
-    if request.method == "POST":
-        if not request.user.has_feature("issues.manage"):
-            raise PermissionDenied
-        if form.is_valid():
-            branch = form.cleaned_data["branch"]
-            if request.user.side == Branch.BRANCH and branch.pk != request.user.branch_id:
-                raise PermissionDenied
-            issue = handle_workflow(
-                request, create_issue,
-                recipient=form.cleaned_data["recipient"],
-                department=form.cleaned_data["department"],
-                issue_date=form.cleaned_data["issue_date"],
-                branch=branch,
-                purpose=form.cleaned_data["purpose"],
-                lines=form.cleaned_data["lines"],
-                user=request.user,
-            )
-            if issue:
-                messages.success(request, f"Issue {issue.number} recorded.")
-                return redirect("issues")
-    issue_list = OfficeIssue.objects.select_related("branch", "issued_by").prefetch_related("lines__item")
-    issue_list = branch_queryset_for_user(request.user, issue_list)
-    return render(request, "inventory/issues.html", {"issues": issue_list, "form": form})
-
-
-@feature_required("issues.manage")
-@require_POST
-def issue_cancel(request, issue_id):
-    issue = get_object_or_404(OfficeIssue.objects.select_related("branch"), pk=issue_id)
-    if request.user.side == Branch.BRANCH and issue.branch_id != request.user.branch_id:
-        raise PermissionDenied
-    form = CancelForm(request.POST)
-    if form.is_valid():
-        result = handle_workflow(
-            request, cancel_issue, issue_id=issue.pk,
-            reason=form.cleaned_data["reason"], user=request.user,
-        )
-        if result:
-            messages.success(request, f"Issue {result.number} cancelled and stock restored.")
-    else:
-        messages.error(request, form.errors.as_text())
-    return redirect("issues")
-
-
-@login_required
-def requests_page(request):
-    settings = SystemSetting.current()
-    if not settings.branch_module_enabled:
-        raise PermissionDenied("The branch module is disabled.")
-    if request.user.side == Branch.BRANCH:
-        if not request.user.has_feature("requests.create"):
-            raise PermissionDenied
-        form = RequestForm(request.POST or None)
-        if request.method == "POST":
-            if not request.user.has_feature("requests.create"):
-                raise PermissionDenied
-            if form.is_valid():
-                result = handle_workflow(
-                    request, create_request, branch=request.user.branch,
-                    notes=form.cleaned_data["notes"], lines=form.cleaned_data["lines"],
-                    user=request.user,
-                )
-                if result:
-                    messages.success(request, f"Request {result.number} submitted.")
-                    return redirect("requests")
-        request_list = StockRequest.objects.filter(branch=request.user.branch)
-    else:
-        if not request.user.has_feature("requests.review"):
-            raise PermissionDenied
-        form = None
-        request_list = StockRequest.objects.select_related("branch", "requested_by", "reviewed_by")
-    return render(request, "inventory/requests.html", {
-        "requests": request_list.prefetch_related("lines__item"),
-        "form": form,
-    })
-
-
-@feature_required("requests.review")
-@main_side_required
-def request_review(request, request_id):
-    request_obj = get_object_or_404(StockRequest.objects.prefetch_related("lines__item"), pk=request_id)
-    form = ReviewRequestForm(request_obj, request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        result = handle_workflow(
-            request, review_request, request_id=request_obj.pk,
-            decisions=form.decisions(), user=request.user,
-        )
-        if result:
-            messages.success(request, f"Request {result.number} reviewed.")
-            return redirect("requests")
-    return render(request, "inventory/action.html", {
-        "title": f"Review {request_obj.number}", "form": form, "back_url": "requests",
-    })
-
-
-@feature_required("requests.create")
-@require_POST
-def request_cancel(request, request_id):
-    request_obj = get_object_or_404(StockRequest, pk=request_id)
-    if request.user.side != Branch.BRANCH or request_obj.branch_id != request.user.branch_id:
-        raise PermissionDenied
-    result = handle_workflow(request, cancel_request, request_id=request_obj.pk, user=request.user)
-    if result:
-        messages.success(request, f"Request {result.number} cancelled.")
-    return redirect("requests")
-
-
-@login_required
-def dispatches(request):
-    if not SystemSetting.current().branch_module_enabled:
-        raise PermissionDenied("The branch module is disabled.")
-    if request.user.side == Branch.BRANCH:
-        if not request.user.has_feature("dispatches.receive"):
-            raise PermissionDenied
-        if request.method == "POST":
-            raise PermissionDenied
-        form = None
-        dispatch_list = Dispatch.objects.filter(destination=request.user.branch)
-    else:
-        if not request.user.has_feature("dispatches.manage"):
-            raise PermissionDenied
-        form = DispatchForm(request.POST or None)
-        if request.method == "POST":
-            if not request.user.has_feature("dispatches.manage"):
-                raise PermissionDenied
-            if form.is_valid():
-                request_obj = form.cleaned_data["request_obj"]
-                if request_obj and request_obj.branch_id != form.cleaned_data["destination"].pk:
-                    form.add_error("request_obj", "Request destination does not match the selected branch.")
+def _purchase_form(request, purchase=None):
+    initial = ({'supplier': purchase.supplier_id, 'purchase_date': purchase.purchase_date, 'invoice_ref': purchase.invoice_ref,
+                'notes': purchase.notes} if purchase else {'purchase_date': timezone.localdate()})
+    form = inv_forms.PurchaseHeaderForm(request.POST or None, initial=initial,
+                                        current_supplier_id=purchase.supplier_id if purchase else None)
+    line_error = None
+    if request.method == 'POST':
+        rows, lines_ok = parse_lines(request.POST, kind='purchase')
+        if form.is_valid() and lines_ok:
+            cd = form.cleaned_data
+            data = {'supplier': cd['supplier'], 'purchase_date': cd['purchase_date'], 'invoice_ref': cd['invoice_ref'], 'notes': cd['notes'],
+                    'lines': [{'item': r['item'], 'quantity_ordered': r['quantity'], 'unit_cost': r['unit_cost']} for r in rows]}
+            try:
+                if purchase is None:
+                    p = purchases.create_purchase(request, data)
+                    messages.success(request, 'Purchase recorded')
                 else:
-                    result = handle_workflow(
-                        request, create_dispatch,
-                        destination=form.cleaned_data["destination"],
-                        request_obj=request_obj,
-                        dispatch_date=form.cleaned_data["dispatch_date"],
-                        lines=form.cleaned_data["lines"],
-                        user=request.user,
-                    )
-                    if result:
-                        messages.success(request, f"Dispatch {result.reference} sent.")
-                        return redirect("dispatches")
-        dispatch_list = Dispatch.objects.select_related("destination", "request", "dispatched_by")
-    return render(request, "inventory/dispatches.html", {
-        "dispatches": dispatch_list.prefetch_related("lines__item"),
-        "form": form,
-    })
-
-
-@feature_required("dispatches.receive")
-def dispatch_receive(request, dispatch_id):
-    dispatch = get_object_or_404(
-        Dispatch.objects.prefetch_related("lines__item"), pk=dispatch_id
-    )
-    if request.user.side == Branch.BRANCH and dispatch.destination_id != request.user.branch_id:
-        raise PermissionDenied
-    form = DispatchReceiptForm(dispatch, request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        result = handle_workflow(
-            request, receive_dispatch, dispatch_id=dispatch.pk,
-            results=form.results(), user=request.user,
-        )
-        if result:
-            messages.success(request, f"Receipt for {result.reference} recorded.")
-            return redirect("dispatches")
-    return render(request, "inventory/action.html", {
-        "title": f"Receive {dispatch.reference}", "form": form, "back_url": "dispatches",
-    })
-
-
-@feature_required("dispatches.manage")
-@main_side_required
-@require_POST
-def dispatch_close(request, dispatch_id):
-    returned = request.POST.get("return_to_stock") == "yes"
-    result = handle_workflow(
-        request, close_dispatch, dispatch_id=dispatch_id,
-        return_to_stock=returned, user=request.user,
-    )
-    if result:
-        messages.success(request, f"Dispatch {result.reference} settled.")
-    return redirect("dispatches")
-
-
-@feature_required("stock.view")
-def stock(request):
-    branch_id = request.GET.get("branch")
-    if request.user.side == Branch.BRANCH:
-        branch = request.user.branch
-    elif branch_id:
-        branch = get_object_or_404(Branch, pk=branch_id)
-    else:
-        branch = main_branch()
-    rows = []
-    for item in Item.objects.filter(active=True).select_related("category"):
-        quantity = get_balance(item, branch)
-        rows.append({
-            "item": item,
-            "quantity": quantity,
-            "value": quantity * item.last_unit_cost,
-            "low": quantity <= item.min_stock,
-        })
-    movement_list = StockLedger.objects.filter(branch=branch, in_transit=False).exclude(
-        movement_type=StockLedger.OPENING_BALANCE
-    ).filter(created_at__gte=timezone.now() - timedelta(days=30)).select_related(
-        "item", "created_by"
-    )[:100]
-    transit = []
-    if request.user.side != Branch.BRANCH:
-        transit = StockLedger.objects.filter(in_transit=True).values(
-            "item__name", "item__code"
-        ).annotate(quantity=Sum("quantity_change")).filter(quantity__gt=0)
-    return render(request, "inventory/stock.html", {
-        "rows": rows, "branch": branch, "branches": Branch.objects.filter(active=True),
-        "movements": movement_list, "transit": transit,
-        "form": StockAdjustmentForm(),
-    })
-
-
-@feature_required("stock.adjust")
-@require_POST
-def stock_adjust(request):
-    form = StockAdjustmentForm(request.POST)
-    if request.user.side == Branch.BRANCH:
-        form.fields["branch"].queryset = Branch.objects.filter(pk=request.user.branch_id)
-    if form.is_valid():
-        branch = form.cleaned_data["branch"]
-        if request.user.side == Branch.BRANCH and branch.pk != request.user.branch_id:
-            raise PermissionDenied
-        result = handle_workflow(
-            request, adjust_stock,
-            item=form.cleaned_data["item"],
-            branch=branch,
-            quantity=form.cleaned_data["quantity"],
-            reason=form.cleaned_data["reason"],
-            note=form.cleaned_data["note"],
-            user=request.user,
-        )
-        if result:
-            messages.success(request, "Stock correction recorded.")
-    else:
-        messages.error(request, form.errors.as_text())
-    return redirect("stock")
-
-
-@feature_required("reports.view")
-def reports(request):
-    report_type = request.GET.get("report", "stock")
-    branch = request.user.branch if request.user.side == Branch.BRANCH else None
-    rows = []
-    if report_type == "stock":
-        balances = balances_for(branch=branch)
-        for item in Item.objects.filter(active=True).select_related("category"):
-            quantity = sum(
-                qty for (item_id, _branch, transit), qty in balances.items()
-                if item_id == item.pk and not transit
-            )
-            rows.append({
-                "item": item,
-                "quantity": quantity,
-                "value": quantity * item.last_unit_cost,
-            })
-    elif report_type == "purchases":
-        if branch:
-            raise PermissionDenied
-        for line in PurchaseLine.objects.filter(
-            purchase__status__in=[SupplierPurchase.RECEIVED, SupplierPurchase.PARTLY_RECEIVED]
-        ).select_related("item", "purchase", "purchase__supplier"):
-            rows.append({
-                "reference": line.purchase.number,
-                "supplier": line.purchase.supplier.name,
-                "date": line.purchase.purchase_date,
-                "item": line.item,
-                "quantity": line.quantity_received,
-                "value": line.quantity_received * line.unit_cost,
-            })
-    elif report_type == "usage":
-        issue_lines = IssueLine.objects.filter(issue__status=OfficeIssue.OPEN).select_related(
-            "item", "issue", "issue__branch"
-        )
-        if branch:
-            issue_lines = issue_lines.filter(issue__branch=branch)
-        for line in issue_lines:
-            rows.append({
-                "reference": line.issue.number,
-                "date": line.issue.issue_date,
-                "location": line.issue.branch.name if line.issue.branch_id else "Main office",
-                "item": line.item,
-                "quantity": line.quantity,
-                "value": line.quantity * line.item.last_unit_cost,
-            })
-    elif report_type == "dispatches":
-        dispatch_lines = DispatchLine.objects.select_related(
-            "item", "dispatch", "dispatch__destination"
-        )
-        if branch:
-            dispatch_lines = dispatch_lines.filter(dispatch__destination=branch)
-        for line in dispatch_lines:
-            rows.append({
-                "reference": line.dispatch.reference,
-                "date": line.dispatch.dispatch_date,
-                "location": line.dispatch.destination.name,
-                "item": line.item,
-                "quantity": line.quantity_sent,
-                "value": line.quantity_sent * line.item.last_unit_cost,
-                "status": line.dispatch.get_status_display(),
-            })
-    else:
-        raise PermissionDenied("Choose a supported report.")
-    if request.GET.get("download") == "1":
-        response = HttpResponse(content_type="text/csv")
-        response["Content-Disposition"] = f'attachment; filename="{report_type}-report.csv"'
-        writer = csv.writer(response)
-
-        def write_row(values):
-            writer.writerow([safe_csv(value) for value in values])
-
-        if report_type == "stock":
-            write_row(["Code", "Item", "Category", "Quantity", "Unit", "Unit cost", "Value"])
-            for row in rows:
-                write_row([
-                    row["item"].code, row["item"].name, row["item"].category.name,
-                    row["quantity"], row["item"].unit, row["item"].last_unit_cost, row["value"],
-                ])
-        elif report_type == "purchases":
-            write_row(["Purchase", "Supplier", "Date", "Item code", "Item", "Received", "Value"])
-            for row in rows:
-                write_row([
-                    row["reference"], row["supplier"], row["date"], row["item"].code,
-                    row["item"].name, row["quantity"], row["value"],
-                ])
+                    p = purchases.update_purchase(request, purchase.pk, data)
+                    messages.success(request, 'Purchase updated')
+                return redirect('inventory:purchase_detail', pk=p.pk)
+            except ServiceError as exc:
+                if exc.field_errors and set(exc.field_errors) & set(form.fields):
+                    apply_service_error(form, exc)
+                else:
+                    line_error = exc.message
+        elif not rows:
+            line_error = 'Add at least one item'
         else:
-            write_row(["Reference", "Date", "Location", "Item code", "Item", "Quantity", "Value", "Status"])
-            for row in rows:
-                write_row([
-                    row["reference"], row["date"], row["location"], row["item"].code,
-                    row["item"].name, row["quantity"], row["value"], row.get("status", ""),
-                ])
-        return response
-    return render(request, "inventory/reports.html", {
-        "rows": rows, "report_type": report_type, "is_branch": branch is not None,
-    })
-
-
-@superuser_required
-def branches(request):
-    branch_id = request.GET.get("edit")
-    branch = get_object_or_404(Branch, pk=branch_id) if branch_id else None
-    form = BranchForm(request.POST or None, instance=branch)
-    if request.method == "POST" and form.is_valid():
-        saved = form.save()
-        audit(request, "branch.update" if branch else "branch.create", saved)
-        messages.success(request, "Branch saved.")
-        return redirect("branches")
-    return render(request, "inventory/admin_list.html", {
-        "title": "Branches", "objects": Branch.objects.all(), "form": form,
-        "list_kind": "branches", "editing": branch,
-    })
-
-
-@superuser_required
-def roles(request):
-    role_id = request.GET.get("edit")
-    role = get_object_or_404(Role, pk=role_id) if role_id else None
-    if role and role.built_in:
-        raise PermissionDenied
-    form = RoleForm(request.POST or None, instance=role)
-    if request.method == "POST" and form.is_valid():
-        saved = form.save()
-        audit(request, "role.update" if role else "role.create", saved)
-        messages.success(request, "Role saved.")
-        return redirect("roles")
-    return render(request, "inventory/admin_list.html", {
-        "title": "Roles", "objects": Role.objects.all(), "form": form,
-        "list_kind": "roles", "editing": role,
-    })
-
-
-@superuser_required
-def users(request):
-    if request.method == "POST":
-        form = UserCreateForm(request.POST)
-        if form.is_valid():
-            user = form.save()
-            audit(request, "user.create", user)
-            messages.success(request, f"Added user {user.email}.")
-            return redirect("users")
+            messages.error(request, 'Please check the highlighted fields.')
     else:
-        form = UserCreateForm()
-    return render(request, "inventory/admin_list.html", {
-        "title": "Users", "objects": User.objects.select_related("role", "branch"), "form": form,
-        "list_kind": "users",
-    })
+        rows = _line_rows_from_purchase(purchase) if purchase else [{'item_id': '', 'errors': {}, 'raw': {'item': '', 'quantity': '', 'unit_cost': ''}}]
+    return render(request, 'inventory/purchase_form.html', {
+        'form': form, 'purchase': purchase, 'rows': rows, 'line_error': line_error,
+        'items': Item.objects.filter(active=True).order_by('name'), 'blank_row': BLANK_ROW,
+        'today': timezone.localdate().isoformat()})
 
 
-@superuser_required
-def user_edit(request, user_id):
-    target = get_object_or_404(User, pk=user_id)
-    if target.is_superuser:
-        raise PermissionDenied
-    form = UserEditForm(request.POST or None, instance=target)
-    if request.method == "POST" and form.is_valid():
-        if target.pk == request.user.pk and (
-            not form.cleaned_data["is_active"] or form.cleaned_data["role"] != target.role
-        ):
-            form.add_error(None, "You cannot deactivate yourself or change your own role.")
-        else:
-            form.save()
-            audit(request, "user.update", target)
-            messages.success(request, f"Updated {target.email}.")
-            return redirect("users")
-    return render(request, "inventory/action.html", {
-        "title": f"Edit {target.email}", "form": form, "back_url": "users",
-    })
+@permission_required('purchases.manage')
+def purchase_create(request):
+    return _purchase_form(request)
 
 
-@superuser_required
-def user_password(request, user_id):
-    target = get_object_or_404(User, pk=user_id)
-    form = SetPasswordForm(target, request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        form.save()
-        target.failed_logins = 0
-        target.locked_until = None
-        target.save(update_fields=["failed_logins", "locked_until"])
-        audit(request, "user.password_reset", target)
-        messages.success(request, f"Password reset for {target.email}.")
-        return redirect("users")
-    return render(request, "inventory/action.html", {
-        "title": f"Reset password for {target.email}", "form": form, "back_url": "users",
-    })
+@permission_required('purchases.manage')
+def purchase_edit(request, pk):
+    p = purchases.get_purchase(request.user, pk)
+    problem = None
+    from core.rules.purchase_rules import locked_problem
+    problem = locked_problem(p.status, list(p.lines.all()), 'edited')
+    if problem:
+        messages.error(request, problem)
+        return redirect('inventory:purchase_detail', pk=p.pk)
+    return _purchase_form(request, p)
 
 
-@superuser_required
+@permission_required('purchases.manage')
 @require_POST
-def user_toggle(request, user_id):
-    target = get_object_or_404(User, pk=user_id)
-    if target.pk == request.user.pk:
-        messages.error(request, "You cannot deactivate your own account.")
-        return redirect("users")
-    if target.is_superuser and target.is_active and User.objects.filter(
-        is_superuser=True, is_active=True
-    ).count() <= 1:
-        messages.error(request, "The last active Super Admin cannot be deactivated.")
-        return redirect("users")
-    target.is_active = not target.is_active
-    target.save(update_fields=["is_active"])
-    audit(request, "user.active_changed", target, new_value={"is_active": target.is_active})
-    messages.success(request, f"User {target.email} updated.")
-    return redirect("users")
-
-
-@superuser_required
-def settings_page(request):
-    setting = SystemSetting.current()
-    form = SettingsForm(request.POST or None, instance=setting)
-    if request.method == "POST" and form.is_valid():
-        form.save()
-        audit(request, "settings.update", setting)
-        messages.success(request, "Settings saved.")
-        return redirect("settings")
-    return render(request, "inventory/settings.html", {"form": form})
-
-
-@superuser_required
-@require_POST
-def role_delete(request, role_id):
-    role = get_object_or_404(Role, pk=role_id)
-    if role.built_in:
-        raise PermissionDenied
-    if role.users.exists():
-        messages.error(request, "Reassign users before deleting this role.")
-        return redirect("roles")
-    audit(request, "role.delete", role)
-    role.delete()
-    messages.success(request, "Role deleted.")
-    return redirect("roles")
-
-
-@superuser_required
-def audit_log(request):
-    logs = AuditLog.objects.select_related("user")
-    start = request.GET.get("start")
-    end = request.GET.get("end")
+def purchase_cancel(request, pk):
     try:
-        start_date = date.fromisoformat(start) if start else None
-        end_date = date.fromisoformat(end) if end else None
+        purchases.cancel_purchase(request, pk)
+        messages.success(request, 'Purchase cancelled')
+    except ServiceError as exc:
+        if exc.status == 404:
+            raise  # shown as a "not found" page by the middleware
+        messages.error(request, exc.message)
+    return redirect('inventory:purchase_detail', pk=pk)
+
+
+@permission_required('purchases.receive')
+def purchase_receive(request, pk):
+    p = purchases.get_purchase(request.user, pk)
+    lines = list(p.lines.all())
+    if p.status not in (PURCHASE_STATUS.ORDERED, PURCHASE_STATUS.PARTLY_RECEIVED):
+        messages.error(request, 'This purchase was cancelled' if p.status == PURCHASE_STATUS.CANCELLED else 'This purchase is already fully received')
+        return redirect('inventory:purchase_detail', pk=p.pk)
+    errors = {}
+    values = {l.pk: str(l.quantity_ordered - (l.quantity_received or 0)) for l in lines}
+    if request.method == 'POST':
+        pairs = parse_pairs(request.POST, ['receive'])
+        requested = []
+        for l in lines:
+            raw = pairs.get(l.pk, {}).get('receive', '')
+            values[l.pk] = raw
+            if l.quantity_ordered - (l.quantity_received or 0) <= 0:
+                continue
+            n, err = whole_number(raw, 0)
+            if err:
+                errors[l.pk] = err
+            else:
+                requested.append({'line_id': l.pk, 'quantity': n})
+        if not errors:
+            if sum(r['quantity'] for r in requested) == 0:
+                messages.error(request, 'Enter a quantity for at least one item')
+            else:
+                try:
+                    purchases.receive_purchase(request, pk, requested)
+                    messages.success(request, 'Stock updated. The items now show the new quantities.')
+                    return redirect('inventory:purchase_detail', pk=pk)
+                except ServiceError as exc:
+                    messages.error(request, exc.message)
+    rows = [{'l': l, 'outstanding': l.quantity_ordered - (l.quantity_received or 0), 'value': values.get(l.pk, ''), 'error': errors.get(l.pk)} for l in lines]
+    return render(request, 'inventory/purchase_receive.html', {'p': p, 'rows': rows})
+
+
+# ================================================================== office issues
+def _issue_view_model(i):
+    lines = list(i.lines.all())
+    return {'i': i, 'lines': lines, 'units': total_units(lines)}
+
+
+@permission_required('issues.view')
+def issue_list(request):
+    g = request.GET
+    search, status = g.get('q', '').strip(), g.get('status', '')
+    f, t, rng, problem = _date_range(request)
+    qs = OfficeIssue.objects.select_related('branch', 'issued_by', 'cancelled_by').prefetch_related('lines')
+    if is_branch_side(request.user):
+        qs = qs.filter(branch_id=request.user.branch_id)
+    if status in ISSUE_STATUS_LABELS:
+        qs = qs.filter(status=status)
+    if search:
+        qs = qs.filter(Q(number__icontains=search) | Q(recipient__icontains=search) | Q(department__icontains=search))
+    if not problem:
+        if rng.get('from'):
+            qs = qs.filter(issue_date__gte=rng['from'])
+        if rng.get('to'):
+            qs = qs.filter(issue_date__lte=rng['to'])
+    rows = [_issue_view_model(i) for i in qs.order_by('-issue_date', '-created_at')]
+    return render(request, 'inventory/issue_list.html', {
+        'rows': rows, 'problem': problem, 'statuses': ISSUE_STATUS_LABELS, 'f': {'q': search, 'status': status, 'from': f, 'to': t},
+        'filters_on': any([search, status, f, t]), 'show_branch': not is_branch_side(request.user),
+        'can_issue': has_any(request.user, ['issues.manage']), 'branch_side': is_branch_side(request.user)})
+
+
+@permission_required('issues.view')
+def issue_detail(request, pk):
+    issue = issues.get_issue(request.user, pk)
+    form = inv_forms.CancelIssueForm()
+    return render(request, 'inventory/issue_detail.html', {
+        **_issue_view_model(issue), 'form': form, 'cancelled': issue.status == 'cancelled',
+        'can_issue': has_any(request.user, ['issues.manage']), 'show_branch': not is_branch_side(request.user)})
+
+
+@permission_required('issues.manage')
+def issue_create(request):
+    form = inv_forms.IssueHeaderForm(request.POST or None, initial={'issue_date': timezone.localdate()})
+    options = _item_options(request.user)
+    line_error = None
+    if request.method == 'POST':
+        rows, lines_ok = parse_lines(request.POST, kind='simple')
+        if form.is_valid() and lines_ok:
+            cd = form.cleaned_data
+            data = {'recipient': cd['recipient'], 'department': cd['department'], 'issue_date': cd['issue_date'], 'purpose': cd['purpose'],
+                    'lines': [{'item': r['item'], 'quantity': r['quantity']} for r in rows]}
+            try:
+                issue = issues.create_issue(request, data)
+                messages.success(request, 'Items issued. Stock has been reduced.')
+                return redirect('inventory:issue_detail', pk=issue.pk)
+            except ServiceError as exc:
+                line_error = exc.message
+        elif not rows:
+            line_error = 'Add at least one item'
+        else:
+            messages.error(request, 'Please check the highlighted fields.')
+    else:
+        rows = [{'item_id': '', 'errors': {}, 'raw': {'item': '', 'quantity': '', 'unit_cost': ''}}]
+    return render(request, 'inventory/issue_form.html', {
+        'form': form, 'rows': rows, 'line_error': line_error, 'items': [i for i in options if i.stock > 0 or str(i.pk) in
+                                                                        {r['raw']['item'] for r in rows}],
+        'nothing_in_stock': all(i.stock <= 0 for i in options), 'blank_row': BLANK_ROW, 'show_stock': True,
+        'today': timezone.localdate().isoformat()})
+
+
+@permission_required('issues.manage')
+@require_POST
+def issue_cancel(request, pk):
+    form = inv_forms.CancelIssueForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, 'Use 200 characters or fewer')
+        return redirect('inventory:issue_detail', pk=pk)
+    try:
+        issues.cancel_issue(request, pk, form.cleaned_data['reason'])
+        messages.success(request, 'Issue cancelled. The items are back in stock.')
+    except ServiceError as exc:
+        if exc.status == 404:
+            raise
+        messages.error(request, exc.message)
+    return redirect('inventory:issue_detail', pk=pk)
+
+
+# ================================================================== stock & movements
+def _balance_rows(branch):
+    items = list(Item.objects.select_related('category').order_by('name'))
+    balances = get_balances(branch.pk)
+    rows = []
+    for i in items:
+        qty = balances.get(i.pk, 0)
+        # Inactive items only matter while they still hold stock.
+        if not i.active and qty == 0:
+            continue
+        rows.append({'item': i, 'quantity': qty, 'low': i.active and qty <= i.min_stock})
+    return rows
+
+
+def _resolve_branch(request, requested):
+    try:
+        return adjustments.resolve_branch(request.user, requested)
+    except ServiceError as exc:
+        messages.error(request, exc.message)
+        return adjustments.resolve_branch(request.user, None)
+
+
+def _movement_ref_numbers(rows):
+    from branchops.models import Dispatch
+    ids = {}
+    for r in rows:
+        if r.source_model and r.source_id.isdigit():
+            ids.setdefault(r.source_model, set()).add(int(r.source_id))
+    out = {}
+    if ids.get('Purchase'):
+        out.update({('Purchase', p.pk): p.number for p in Purchase.objects.filter(pk__in=ids['Purchase']).only('number')})
+    if ids.get('OfficeIssue'):
+        out.update({('OfficeIssue', p.pk): p.number for p in OfficeIssue.objects.filter(pk__in=ids['OfficeIssue']).only('number')})
+    if ids.get('Dispatch'):
+        out.update({('Dispatch', d.pk): d.reference for d in Dispatch.objects.filter(pk__in=ids['Dispatch']).only('reference')})
+    return out
+
+
+@permission_required('stock.view')
+def stock_page(request):
+    user = request.user
+    tab = 'movements' if request.GET.get('tab') == 'movements' else 'stock'
+    can_adjust = has_any(user, ['stock.adjust'])
+    branch = _resolve_branch(request, request.GET.get('branch') if tab == 'stock' else None)
+    branches = [] if is_branch_side(user) else list(Branch.objects.filter(active=True).order_by('type', 'name'))
+    can_pick_branch = len(branches) > 1
+    ctx = {'tab': tab, 'branch': branch, 'branches': branches, 'can_pick_branch': can_pick_branch, 'can_adjust': can_adjust}
+
+    if tab == 'stock':
+        rows = _balance_rows(branch) if branch else []
+        q = request.GET.get('q', '').strip().lower()
+        low_only = request.GET.get('low') == '1'
+        shown = [r for r in rows if (not low_only or r['low']) and (not q or q in r['item'].name.lower() or q in r['item'].code.lower())]
+        ctx.update({'rows': shown, 'f': {'q': request.GET.get('q', ''), 'low': low_only}, 'filters_on': bool(q or low_only)})
+        return render(request, 'inventory/stock.html', ctx)
+
+    g = request.GET
+    branch_f, item_f, type_f = g.get('branch', ''), g.get('item', ''), g.get('type', '')
+    f, t, rng, problem = _date_range(request)
+    qs = StockLedger.objects.exclude(type=LEDGER_TYPES.OPENING_BALANCE).select_related('item', 'branch', 'created_by')
+    if is_branch_side(user):
+        qs = qs.filter(branch_id=user.branch_id)
+    elif branch_f == 'in_transit':
+        qs = qs.filter(in_transit=True)
+    elif branch_f.isdigit():
+        qs = qs.filter(branch_id=int(branch_f))
+    if item_f.isdigit():
+        qs = qs.filter(item_id=int(item_f))
+    if type_f in MOVEMENT_TYPES:
+        qs = qs.filter(type=type_f)
+    if not problem:
+        start, end = _day_bounds(rng)
+        if start:
+            qs = qs.filter(created_at__gte=start)
+        if end:
+            qs = qs.filter(created_at__lte=end)
+    try:
+        page_no = max(int(g.get('page', 1)), 1)
     except ValueError:
-        messages.error(request, "Choose valid audit filter dates.")
-        start_date, end_date = None, None
-    if start_date and end_date and start_date > end_date:
-        messages.error(request, "The start date must not be after the end date.")
-        start_date, end_date = None, None
-    if start_date:
-        logs = logs.filter(created_at__date__gte=start_date)
-    if end_date:
-        logs = logs.filter(created_at__date__lte=end_date)
-    return render(request, "inventory/audit.html", {
-        "logs": logs[:250], "start": start, "end": end,
-    })
+        page_no = 1
+    paginator = Paginator(qs.order_by('-created_at', '-id'), PAGE_SIZE)
+    page = paginator.get_page(page_no)
+    refs = _movement_ref_numbers(page.object_list)
+    movements = []
+    for m in page.object_list:
+        reason = REASON_LABELS.get(m.reason, m.reason)
+        ref = refs.get((m.source_model, int(m.source_id))) if m.source_id.isdigit() else None
+        detail = ' · '.join(x for x in [ref, ': '.join(x for x in [reason, m.note] if x)] if x)
+        movements.append({'m': m, 'detail': detail, 'ref': ref, 'text': ': '.join(x for x in [reason, m.note] if x)})
+    ctx.update({'movements': movements, 'page': page.number, 'pages': paginator.num_pages, 'total': paginator.count,
+                'items': Item.objects.order_by('name'), 'types': MOVEMENT_TYPES, 'problem': problem,
+                'f': {'branch': branch_f, 'item': item_f, 'type': type_f, 'from': f, 'to': t},
+                'filters_on': any([branch_f, item_f, type_f, f, t])})
+    return render(request, 'inventory/stock.html', ctx)
 
 
-@superuser_required
-@require_POST
-def clear_audit(request):
-    start, end = request.POST.get("start"), request.POST.get("end")
-    try:
-        start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
-    except (TypeError, ValueError):
-        messages.error(request, "Choose a valid start and end date.")
-        return redirect("audit")
-    if start_date > end_date:
-        messages.error(request, "The start date must not be after the end date.")
-        return redirect("audit")
-    deleted, _ = AuditLog.objects.filter(
-        created_at__date__gte=start_date, created_at__date__lte=end_date
-    ).delete()
-    audit(
-        request,
-        "audit.clear",
-        new_value={"start": start_date.isoformat(), "end": end_date.isoformat(), "deleted": deleted},
-    )
-    messages.success(request, f"Cleared {deleted} audit entries.")
-    return redirect("audit")
-
-
-class ChangePasswordView(PasswordChangeView):
-    template_name = "inventory/action.html"
-    success_url = reverse_lazy("dashboard")
-    extra_context = {"title": "Change password", "back_url": "dashboard"}
-
-    def form_valid(self, form):
-        response = super().form_valid(form)
-        update_session_auth_hash(self.request, self.request.user)
-        messages.success(self.request, "Password changed.")
-        return response
+@permission_required('stock.adjust')
+def stock_correct(request):
+    user = request.user
+    branch = _resolve_branch(request, request.POST.get('branch') or request.GET.get('branch'))
+    if not branch:
+        messages.error(request, 'No main office exists. Run the seed command first')
+        return redirect('inventory:stock')
+    rows = _balance_rows(branch)
+    allowed = Item.objects.filter(pk__in=[r['item'].pk for r in rows])
+    qty_by_item = {r['item'].pk: r['quantity'] for r in rows}
+    initial = {'item': request.GET.get('item') or None, 'direction': 'add', 'branch': branch.pk}
+    form = inv_forms.CorrectionForm(request.POST or None, initial=initial, item_queryset=allowed)
+    if request.method == 'POST' and form.is_valid():
+        cd = form.cleaned_data
+        try:
+            balance = adjustments.create_adjustment(request, branch=branch, item=cd['item'], direction=cd['direction'],
+                                                    quantity=cd['quantity'], reason=cd['reason'], note=cd['note'])
+            messages.success(request, f'Stock corrected. {cd["item"].name} now shows {balance} at {branch.name}.')
+            return redirect(f"{reverse('inventory:stock')}?branch={branch.pk}")
+        except ServiceError as exc:
+            apply_service_error(form, exc)
+    return render(request, 'inventory/stock_correct.html', {
+        'form': form, 'branch': branch, 'rows': rows, 'qty_by_item': qty_by_item,
+        'reasons_for_json': json.dumps(REASONS_FOR), 'reason_labels_json': json.dumps(REASON_LABELS)})

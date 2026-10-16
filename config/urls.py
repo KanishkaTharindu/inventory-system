@@ -1,7 +1,14 @@
-from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
-    path("django-admin/", admin.site.urls),
-    path("", include("inventory.urls")),
+    path('', include('core.urls')),
+    path('', include('accounts.urls')),
+    path('', include('catalog.urls')),
+    path('', include('inventory.urls')),
+    path('', include('branchops.urls')),
+    path('', include('pettycash.urls')),
+    path('reports/', include('reports.urls')),
 ]
+
+handler403 = 'core.views.permission_denied'
+handler404 = 'core.views.not_found'
