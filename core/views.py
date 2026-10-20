@@ -1,4 +1,5 @@
 import json
+import secrets
 from datetime import datetime, time
 
 from django.conf import settings as dj_settings
@@ -192,15 +193,15 @@ def health(request):
     return JsonResponse({'status': 'ok', 'database': db, 'time': timezone.now().isoformat()})
 
 
-@csrf_exempt
-@require_GET
+@csrf_exempt  # The scheduled caller authenticates with a non-cookie bearer token.
+@require_POST
 def stock_ledger_retention(request):
     """Called by the scheduler (Authorization: Bearer <CRON_SECRET>). Replaces ledger rows older than 30 days
     with opening balances."""
     from inventory.services.retention import prune_old_stock_movements
     secret = dj_settings.CRON_SECRET
     sent = request.META.get('HTTP_AUTHORIZATION', '')
-    if not secret or sent != f'Bearer {secret}':
+    if not secret or not secrets.compare_digest(sent, f'Bearer {secret}'):
         return JsonResponse({'message': 'Scheduled cleanup authorization failed'}, status=401)
     result = prune_old_stock_movements()
     if result['deleted_count'] > 0:

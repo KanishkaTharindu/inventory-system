@@ -3,6 +3,8 @@ Safe to run more than once.   Usage: python manage.py seed
 Set SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD (environment or .env) to choose the first login."""
 import os
 
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
@@ -37,9 +39,14 @@ class Command(BaseCommand):
 
             if not User.objects.filter(email=email).exists():
                 if not password:
-                    raise CommandError('Set SEED_ADMIN_PASSWORD to choose the first Super Admin password, then run the seed again.')
-                if len(password) < 8:
-                    raise CommandError('SEED_ADMIN_PASSWORD must be at least 8 characters.')
+                    raise CommandError('Set SEED_ADMIN_PASSWORD (at least 12 characters) to choose the first Super Admin password, then run the seed again.')
+                if len(password) < 12:
+                    raise CommandError('SEED_ADMIN_PASSWORD must be at least 12 characters.')
+                try:
+                    validate_password(password, user=User(name=name, email=email))
+                except ValidationError as exc:
+                    raise CommandError('SEED_ADMIN_PASSWORD does not meet the password policy: '
+                                       + '; '.join(exc.messages)) from None
                 User.objects.create_user(email=email, password=password, name=name, role=ROLES.SUPER_ADMIN, branch=main)
                 self.stdout.write(f'Created Super Admin: {email}')
             else:

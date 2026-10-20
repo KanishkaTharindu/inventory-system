@@ -40,6 +40,8 @@ if not SECRET_KEY:
         SECRET_KEY = 'insecure-dev-key-not-for-production'
     else:
         raise RuntimeError('Set DJANGO_SECRET_KEY (or DJANGO_DEBUG=true for local development).')
+if not DEBUG and (len(SECRET_KEY) < 50 or SECRET_KEY == 'insecure-dev-key-not-for-production'):
+    raise RuntimeError('DJANGO_SECRET_KEY must be a unique, randomly generated value of at least 50 characters in production.')
 
 ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1')
 CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
@@ -68,6 +70,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.ContentSecurityPolicyMiddleware',
     # Creates the default roles once, then makes sure the signed-in account is still allowed in.
     'core.middleware.CurrentUserMiddleware',
 ]
@@ -88,7 +91,13 @@ TEMPLATES = [{
     ]},
 }]
 
-if env('DB_ENGINE', 'sqlite') == 'postgres':
+DB_ENGINE = env('DB_ENGINE', 'sqlite').strip().lower()
+if DB_ENGINE == 'postgres':
+    db_options = {'sslmode': env('DB_SSLMODE', 'prefer' if DEBUG else 'require')}
+    if env('DB_SSLROOTCERT'):
+        db_options['sslrootcert'] = env('DB_SSLROOTCERT')
+    if not DEBUG and (not env('DB_USER') or not env('DB_PASSWORD')):
+        raise RuntimeError('Set DB_USER and DB_PASSWORD for the production PostgreSQL connection.')
     DATABASES = {'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': env('DB_NAME', 'office_stock'),
@@ -96,6 +105,7 @@ if env('DB_ENGINE', 'sqlite') == 'postgres':
         'PASSWORD': env('DB_PASSWORD', ''),
         'HOST': env('DB_HOST', 'localhost'),
         'PORT': env('DB_PORT', '5432'),
+        'OPTIONS': db_options,
     }}
 else:
     DATABASES = {'default': {
@@ -103,6 +113,20 @@ else:
         'NAME': BASE_DIR / 'db.sqlite3',
         'OPTIONS': {'timeout': 20},
     }}
+
+CACHE_BACKEND = env('DJANGO_CACHE_BACKEND', 'locmem').strip().lower()
+if CACHE_BACKEND == 'database':
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': env('DJANGO_CACHE_TABLE', 'django_cache'),
+    }}
+elif CACHE_BACKEND == 'locmem':
+    CACHES = {'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'office-stock-login-throttle',
+    }}
+else:
+    raise RuntimeError('DJANGO_CACHE_BACKEND must be locmem or database.')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -116,8 +140,17 @@ LOGOUT_REDIRECT_URL = 'accounts:login'
 SESSION_COOKIE_AGE = 8 * 60 * 60
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SECURE = not DEBUG
 
-AUTH_PASSWORD_VALIDATORS = []  # the original rule is just "at least 8 characters" (enforced in forms)
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator', 'OPTIONS': {'min_length': 12}},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
 
 LANGUAGE_CODE = 'en-gb'
 TIME_ZONE = env('TIME_ZONE', 'Asia/Colombo')
@@ -135,12 +168,23 @@ STORAGES = {
 
 CRON_SECRET = env('CRON_SECRET', '')
 
-if not DEBUG:
+SECURE_SSL_REDIRECT = env_bool('DJANGO_SSL_REDIRECT', not DEBUG)
+SECURE_HSTS_SECONDS = int(env('DJANGO_HSTS_SECONDS', '0')) if not DEBUG else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('DJANGO_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = env_bool('DJANGO_HSTS_PRELOAD', False)
+if not DEBUG and env_bool('DJANGO_TRUST_X_FORWARDED_PROTO', False):
+    # Enable only when the trusted reverse proxy strips client-supplied copies of this header.
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    SECURE_SSL_REDIRECT = env_bool('DJANGO_SSL_REDIRECT', True)
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_CONTENT_TYPE_NOSNIFF = True
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
+
+CSP_POLICY = (
+    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+    "form-action 'self'; img-src 'self' data:; font-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+)
 
 MESSAGE_TAGS = {40: 'error'}

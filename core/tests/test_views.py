@@ -1,5 +1,5 @@
 """Page-level checks through the Django test client."""
-from django.test import TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from core.models import Setting
@@ -24,6 +24,31 @@ class AccessTests(TestCase):
         r = self.client.post(reverse('accounts:login'), {'email': 'admin@example.test', 'password': 'nope-nope-nope'})
         self.assertEqual(r.status_code, 200)
         self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_login_post_requires_csrf_token(self):
+        client = Client(enforce_csrf_checks=True)
+        response = client.post(reverse('accounts:login'), {
+            'email': 'admin@example.test', 'password': PASSWORD,
+        })
+        self.assertEqual(response.status_code, 403)
+
+    def test_login_rejects_external_next_redirect(self):
+        response = self.client.post(reverse('accounts:login'), {
+            'email': 'admin@example.test', 'password': PASSWORD, 'next': 'https://attacker.example/',
+        })
+        self.assertRedirects(response, reverse('core:dashboard'), fetch_redirect_response=False)
+
+    def test_security_headers_and_external_motion_bootstrap(self):
+        response = self.client.get(reverse('accounts:login'))
+        self.assertIn('Content-Security-Policy', response)
+        self.assertIn("script-src 'self'", response['Content-Security-Policy'])
+        self.assertNotIn('<script>', response.content.decode())
+
+    @override_settings(CRON_SECRET='audit-test-cron-secret')
+    def test_stock_retention_endpoint_requires_post_and_bearer_secret(self):
+        url = reverse('core:stock_retention')
+        self.assertEqual(self.client.get(url).status_code, 405)
+        self.assertEqual(self.client.post(url).status_code, 401)
 
     def test_admin_can_open_every_main_page(self):
         receive_stock(self.w, self.w.paper, 5)

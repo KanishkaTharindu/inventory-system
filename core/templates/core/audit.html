@@ -13,17 +13,17 @@
   </div>
 </div>
 
-<form method="get" class="grid grid-4" style="margin-bottom:1rem">
-  <select name="user" aria-label="Person" onchange="this.form.submit()">
+<form method="get" class="grid grid-4" style="margin-bottom:1rem" data-audit-filters>
+  <select name="user" aria-label="Person">
     <option value="">Everyone</option>
     {% for u in users %}<option value="{{ u.pk }}" {% if f.user == u.pk|stringformat:"s" %}selected{% endif %}>{{ u.name }}</option>{% endfor %}
   </select>
-  <select name="area" aria-label="Area" onchange="this.form.submit()">
+  <select name="area" aria-label="Area">
     <option value="">All areas</option>
     {% for key, label in areas %}<option value="{{ key }}" {% if f.area == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
   </select>
-  <input type="date" name="from" value="{{ f.from }}" aria-label="From date" onchange="this.form.submit()">
-  <input type="date" name="to" value="{{ f.to }}" aria-label="To date" onchange="this.form.submit()">
+  <input type="date" name="from" value="{{ f.from }}" aria-label="From date">
+  <input type="date" name="to" value="{{ f.to }}" aria-label="To date">
 </form>
 
 <div style="display:flex;justify-content:flex-end;margin-bottom:1rem">
@@ -70,13 +70,4 @@
   {% pagination page pages total "entries" %}
 </div>
 {% endif %}
-{% endblock %}
-{% block scripts %}
-<script>
-document.addEventListener('click', function (e) {
-  var b = e.target.closest('[data-toggle-row]'); if (!b) return;
-  var row = document.getElementById(b.getAttribute('data-toggle-row')); row.classList.toggle('hidden');
-  b.textContent = row.classList.contains('hidden') ? 'Details' : 'Hide';
-});
-</script>
 {% endblock %}

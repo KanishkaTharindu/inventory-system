@@ -1,4 +1,5 @@
 from django import forms
+from django.contrib.auth.password_validation import validate_password
 
 from accounts.models import Branch
 from core.forms import DateInput  # noqa: F401  (re-exported for convenience)
@@ -17,10 +18,19 @@ class LoginForm(forms.Form):
 class ChangePasswordForm(forms.Form):
     current_password = forms.CharField(label='Current password', error_messages={'required': 'Enter your current password'},
                                        widget=forms.PasswordInput(attrs={'autocomplete': 'current-password', 'autofocus': True}))
-    new_password = forms.CharField(label='New password', min_length=8, help_text='At least 8 characters',
-                                   error_messages={'required': 'Use at least 8 characters', 'min_length': 'Use at least 8 characters'},
+    new_password = forms.CharField(label='New password', min_length=12, help_text='At least 12 characters',
+                                   error_messages={'required': 'Use at least 12 characters', 'min_length': 'Use at least 12 characters'},
                                    widget=forms.PasswordInput(attrs={'autocomplete': 'new-password'}))
     confirm = forms.CharField(label='Confirm new password', widget=forms.PasswordInput(attrs={'autocomplete': 'new-password'}))
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+
+    def clean_new_password(self):
+        password = self.cleaned_data['new_password']
+        validate_password(password, user=self.user)
+        return password
 
     def clean(self):
         data = super().clean()
@@ -33,10 +43,19 @@ class ChangePasswordForm(forms.Form):
 
 
 class ResetPasswordForm(forms.Form):
-    password = forms.CharField(label='New temporary password', min_length=8,
-                               help_text='At least 8 characters. Tell the user privately; they can change it after signing in',
-                               error_messages={'required': 'Use at least 8 characters', 'min_length': 'Use at least 8 characters'},
-                               widget=forms.TextInput(attrs={'autocomplete': 'new-password', 'autofocus': True}))
+    password = forms.CharField(label='New temporary password', min_length=12,
+                               help_text='At least 12 characters. Tell the user privately; they can change it after signing in',
+                               error_messages={'required': 'Use at least 12 characters', 'min_length': 'Use at least 12 characters'},
+                               widget=forms.PasswordInput(attrs={'autocomplete': 'new-password', 'autofocus': True}))
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+
+    def clean_password(self):
+        password = self.cleaned_data['password']
+        validate_password(password, user=self.user)
+        return password
 
 
 class UserForm(forms.Form):
@@ -45,10 +64,10 @@ class UserForm(forms.Form):
     role = forms.CharField(label='Role', error_messages={'required': 'Choose a role'})
     branch = forms.ModelChoiceField(label='Branch', queryset=Branch.objects.none(), empty_label='Choose…',
                                     error_messages={'required': 'Choose a branch', 'invalid_choice': 'Choose a valid branch'})
-    password = forms.CharField(label='Temporary password', min_length=8, required=False,
-                               help_text='At least 8 characters. The user can change it after signing in',
-                               widget=forms.TextInput(attrs={'autocomplete': 'new-password'}),
-                               error_messages={'min_length': 'Use at least 8 characters'})
+    password = forms.CharField(label='Temporary password', min_length=12, required=False,
+                               help_text='At least 12 characters. The user can change it after signing in',
+                               widget=forms.PasswordInput(attrs={'autocomplete': 'new-password'}),
+                               error_messages={'min_length': 'Use at least 12 characters'})
 
     def __init__(self, *args, editing=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -73,6 +92,14 @@ class UserForm(forms.Form):
         if qs.exists():
             raise forms.ValidationError('That email is already in use')
         return email
+
+    def clean_password(self):
+        password = self.cleaned_data['password']
+        if password:
+            from accounts.models import User
+            candidate = User(name=self.cleaned_data.get('name', ''), email=self.cleaned_data.get('email', ''))
+            validate_password(password, user=candidate)
+        return password
 
 
 class RoleForm(forms.Form):

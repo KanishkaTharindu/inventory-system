@@ -110,7 +110,7 @@ class BranchFlowTests(TestCase):
         dispatches.close_dispatch(officer_req, d.pk, 'return_to_main', 'came back')
         d.refresh_from_db()
         self.assertEqual(d.status, DISPATCH_STATUS.CLOSED)
-        self.assertEqual(get_balance(w.main.pk, w.paper.pk), 37)  # 35 + 1 damaged + 2 short returned
+        self.assertEqual(get_balance(w.main.pk, w.paper.pk), 38)  # 35 + 1 damaged + 2 short returned
         self.assertEqual(StockLedger.objects.filter(in_transit=True).aggregate(t=models.Sum('quantity_change'))['t'], 0)
 
     def test_only_own_branch_can_cancel_and_only_before_review(self):
