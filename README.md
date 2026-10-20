@@ -11,7 +11,7 @@ Django project, no separate API or front-end build.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1    # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install -r requirements.txt
-Copy-Item .env.example .env     # then edit it: set SEED_ADMIN_PASSWORD at least
+Copy-Item .env.example .env     # then choose a unique SEED_ADMIN_PASSWORD of at least 12 characters
 python manage.py makemigrations core accounts catalog inventory branchops pettycash
 python manage.py migrate
 python manage.py seed           # main office, first Super Admin, starter categories, default roles
@@ -23,7 +23,7 @@ python manage.py runserver
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # then edit it: set SEED_ADMIN_PASSWORD at least
+cp .env.example .env            # then choose a unique SEED_ADMIN_PASSWORD of at least 12 characters
 python manage.py makemigrations core accounts catalog inventory branchops pettycash
 python manage.py migrate
 python manage.py seed           # main office, first Super Admin, starter categories, default roles
@@ -86,25 +86,61 @@ python -m unittest core.tests.test_rules
 | `DJANGO_SECRET_KEY` | Required unless `DJANGO_DEBUG=true`. |
 | `DJANGO_DEBUG` | `true` for local development only. |
 | `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` | Hosts and full origins (with `https://`) when deployed. |
+| `DJANGO_SSL_REDIRECT`, `DJANGO_HSTS_SECONDS`, `DJANGO_TRUST_X_FORWARDED_PROTO` | HTTPS and HSTS controls; see the production notes below. |
+| `DJANGO_CACHE_BACKEND` | `locmem` by default; use `database` with `createcachetable` for multiple workers. |
 | `TIME_ZONE` | Default `Asia/Colombo`. Dates and reports use this zone. |
-| `DB_ENGINE` | `sqlite` (default) or `postgres` (+ `DB_NAME/USER/PASSWORD/HOST/PORT`). |
+| `DB_ENGINE` | `sqlite` (default) or `postgres` (+ `DB_NAME/USER/PASSWORD/HOST/PORT/SSLMODE/SSLROOTCERT`). |
 | `CRON_SECRET` | Bearer secret for the daily 30-day cleanup URL. |
 | `SEED_ADMIN_*`, `SEED_COMPANY_NAME` | Used by `manage.py seed`. |
 
 ## Deploying
 
-`gunicorn config.wsgi` behind HTTPS; static files are served by WhiteNoise (`python manage.py collectstatic`).
-With `DJANGO_DEBUG` off, secure cookies, HSTS and the SSL redirect are on.
+Use a maintained Python release (3.11 or newer; Python 3.10 reached end of life in October 2026) and install from
+`requirements.txt` in the exact virtual environment used by the web app. Update the local Gunicorn before serving
+traffic. cPanel hosting varies: use its supported Python app interface and WSGI entry point, or `gunicorn config.wsgi`
+behind its HTTPS reverse proxy where available. Do not use `runserver` in production. Serve static files with WhiteNoise
+(`python manage.py collectstatic`).
 
-**Daily stock-movement cleanup.** Schedule a request every day (the original ran at 00:15):
+Before deployment, set these values in cPanel's application environment or in a private `.env` outside the public web
+root. Do not commit real credentials:
+
+- `DJANGO_DEBUG=false`, a unique random `DJANGO_SECRET_KEY` of at least 50 characters, the exact production hostname in
+  `DJANGO_ALLOWED_HOSTS`, and the HTTPS origin in `DJANGO_CSRF_TRUSTED_ORIGINS`.
+- `DJANGO_SSL_REDIRECT=true`. This assumes HTTPS is enabled and Django can detect it. Set
+  `DJANGO_TRUST_X_FORWARDED_PROTO=true` only if a trusted proxy overwrites client-supplied `X-Forwarded-Proto`.
+- Keep `DJANGO_HSTS_SECONDS=0` while setting up HTTPS. After HTTPS and redirects work on every hostname, set it to
+  `31536000`. Leave `DJANGO_HSTS_INCLUDE_SUBDOMAINS` and `DJANGO_HSTS_PRELOAD` false unless every affected hostname is
+  ready for HSTS. These settings can make an HTTP-only hostname unreachable for a long time.
+- Prefer PostgreSQL for a hosted production database. Set `DB_ENGINE=postgres`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`,
+  and `DB_HOST`. Use `DB_SSLMODE=verify-full` and `DB_SSLROOTCERT` when the provider supplies a CA certificate; use
+  `require` if the provider supports TLS but not certificate verification. Use a dedicated database account and back up
+  the database privately.
+- Set a long random `CRON_SECRET` if the scheduled cleanup URL is used. Keep `.env`, database files, and backups outside
+  `public_html`; restrict their filesystem permissions to the application account.
+- The per-IP login throttle uses per-process memory by default. If cPanel runs multiple workers, set
+  `DJANGO_CACHE_BACKEND=database` and run `python manage.py createcachetable` once after migrations so all workers
+  share the throttle counters. The five-failure account lockout is stored in the database either way.
+- Set a unique Super Admin password that passes the 12-character password policy. Rotate any password that was shared,
+  weak, or entered into a public or recorded chat.
+
+The repository ignores `.env` and database files. The current `db.sqlite3` has been removed from the Git index while
+the local copy is preserved; historical commits still contain database copies. If any copy held real data or password
+hashes, treat those records as exposed and rotate affected credentials. Purging old Git history requires a coordinated
+history rewrite and does not replace credential rotation.
+
+After setting the production environment, run `python manage.py check --deploy`, `python manage.py migrate`, and
+`python manage.py collectstatic` using the production virtual environment. Back up the database before applying
+migrations to a populated instance.
+
+**Daily stock-movement cleanup.** Schedule an authenticated `POST` request every day (the original ran at 00:15):
 
 ```
-GET /maintenance/stock-ledger-retention/
+POST /maintenance/stock-ledger-retention/
 Authorization: Bearer <CRON_SECRET>
 ```
 
 or run `python manage.py prune_stock_movements` from cron (Task Scheduler on Windows). To test the URL from PowerShell:
-`Invoke-WebRequest -Headers @{Authorization="Bearer <CRON_SECRET>"} http://127.0.0.1:8000/maintenance/stock-ledger-retention/`. Movements older than 30 days are replaced by one
+`Invoke-WebRequest -Method Post -Headers @{Authorization="Bearer <CRON_SECRET>"} https://your-subdomain.example.com/maintenance/stock-ledger-retention/`. Movements older than 30 days are replaced by one
 "opening balance" row per item and location, so stock levels never change.
 
 ## Management commands

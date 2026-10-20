@@ -1,5 +1,7 @@
 """The sample-data and clear-all commands."""
 from io import StringIO
+import os
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -36,6 +38,7 @@ def run(name, *args):
 class SampleDataCommandTests(TestCase):
     def setUp(self):
         self.w = minimal_world()
+
 
     def test_loads_five_of_each_and_refuses_a_second_run(self):
         run('seed_sample_data')
@@ -87,3 +90,15 @@ class ClearAllDataCommandTests(TestCase):
         with self.assertRaises(CommandError):
             run('clear_all_data', '--yes')
         self.assertTrue(Item.objects.exists())
+
+
+class SeedPasswordPolicyTests(TestCase):
+    def test_seed_refuses_a_weak_initial_admin_password(self):
+        values = {
+            'SEED_ADMIN_NAME': 'Initial Admin',
+            'SEED_ADMIN_EMAIL': 'initial-admin@example.test',
+            'SEED_ADMIN_PASSWORD': '123456789012',
+        }
+        with patch.dict(os.environ, values):
+            with self.assertRaises(CommandError):
+                call_command('seed', stdout=StringIO())

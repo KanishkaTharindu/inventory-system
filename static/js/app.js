@@ -10,6 +10,20 @@
     if (e.target.closest('[data-nav-close]')) document.body.classList.remove('nav-open');
   });
 
+  // ---- audit log controls
+  document.addEventListener('change', function (e) {
+    var form = e.target.closest('form[data-audit-filters]');
+    if (form) form.submit();
+  });
+  document.addEventListener('click', function (e) {
+    var button = e.target.closest('[data-toggle-row]');
+    if (!button) return;
+    var row = document.getElementById(button.getAttribute('data-toggle-row'));
+    if (!row) return;
+    row.classList.toggle('hidden');
+    button.textContent = row.classList.contains('hidden') ? 'Details' : 'Hide';
+  });
+
   // ---- confirm before risky actions: <form data-confirm="..."> or <button data-confirm="...">
   document.addEventListener('submit', function (e) {
     var msg = e.target.getAttribute('data-confirm');

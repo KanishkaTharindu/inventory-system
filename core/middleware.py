@@ -70,3 +70,17 @@ class CurrentUserMiddleware:
         if back and url_has_allowed_host_and_scheme(back, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
             return redirect(back)
         return redirect('core:dashboard')
+
+
+class ContentSecurityPolicyMiddleware:
+    """Apply the app's restrictive CSP to pages and downloads."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if 'Content-Security-Policy' not in response:
+            from django.conf import settings
+            response['Content-Security-Policy'] = settings.CSP_POLICY
+        return response
