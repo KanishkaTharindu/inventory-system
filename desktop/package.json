@@ -1,0 +1,47 @@
+{
+  "name": "office-stock-desktop",
+  "version": "1.0.0",
+  "author": "Office Stock",
+  "private": true,
+  "description": "Office Stock local Windows desktop client",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis --x64",
+    "dist:dir": "electron-builder --dir --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.officestock.desktop",
+    "productName": "Office Stock",
+    "protocols": [
+      {
+        "name": "Office Stock authentication",
+        "schemes": ["officestock"]
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "ui/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "OfficeStock-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

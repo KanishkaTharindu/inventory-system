@@ -1,7 +1,13 @@
-# Office Stock System (Django)
+# Office Stock System
 
-A Django port of the Heritage Office Stock System (formerly Express + MongoDB + React). One server-rendered
-Django project, no separate API or front-end build.
+This repository contains two ways to run Office Stock:
+
+- **Windows desktop with Supabase:** Follow the complete [desktop setup and troubleshooting guide](desktop/README.md). Each PC runs the Electron app locally and connects directly to the shared Supabase project. No Office Stock server is required.
+- **Django web version:** The rest of this README documents the separate Django application. It uses Python and its own `.env` settings. `DB_ENGINE=sqlite` and the other database variables below do not configure the desktop app.
+
+## Django web version
+
+A Django port of the Heritage Office Stock System (formerly Express + MongoDB + React). One server-rendered Django project, no separate API or front-end build.
 
 ## Quick start (local)
 

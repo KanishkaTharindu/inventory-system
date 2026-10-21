@@ -1,0 +1,55 @@
+html, body { height: 100%; overflow: hidden; }
+body { background: #f4f8fc; }
+#app { height: 100%; }
+.shell { height: 100%; min-height: 0; }
+.sidebar { height: 100%; overflow: hidden; }
+.sidebar .nav { overflow-y: auto; }
+.main-col { min-height: 0; height: 100%; }
+.content { overflow: auto; max-width: none; width: 100%; }
+.topbar { flex: none; }
+.nav a { cursor: pointer; border: 0; background: transparent; width: 100%; text-align: left; }
+.nav .nav-section { padding: 1rem .75rem .35rem; color: #93a4b7; font-size: .68rem; text-transform: uppercase; letter-spacing: .12em; }
+.page-header { margin-bottom: 1.2rem; }
+.data-wrap { overflow: auto; width: 100%; }
+table.data { width: 100%; min-width: 640px; }
+table.data th, table.data td { vertical-align: middle; }
+.field input, .field select, .field textarea, input.input, select.input, textarea.input {
+  width: 100%; border: 1px solid #cbd5e1; background: #fff; border-radius: 9px; padding: .65rem .75rem;
+  color: #1e293b; font: inherit; min-height: 42px;
+}
+.field textarea, textarea.input { min-height: 92px; resize: vertical; }
+.field label, .lbl { display: block; margin-bottom: .35rem; font-size: .83rem; font-weight: 600; color: #334155; }
+.form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .9rem 1rem; }
+.form-grid .span-2 { grid-column: span 2; }
+.modal { width: min(720px,calc(100vw - 32px)); max-height: calc(100vh - 36px); overflow: auto; border: 0; border-radius: 18px; padding: 0; box-shadow: 0 24px 80px rgba(15,23,42,.28); }
+.modal::backdrop { background: rgba(15,23,42,.5); backdrop-filter: blur(3px); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; padding: 1rem 1.25rem; }
+.modal-body { padding: 1.25rem; }
+.modal-foot { display: flex; justify-content: flex-end; gap: .55rem; padding: 1rem 1.25rem; border-top: 1px solid #e2e8f0; }
+.toast { position: fixed; right: 22px; bottom: 22px; z-index: 100; max-width: 420px; padding: .9rem 1.1rem; border-radius: 12px; color: #fff; background: #0f766e; box-shadow: 0 12px 32px rgba(15,23,42,.2); }
+.toast.error { background: #b91c1c; }
+.auth-screen { height: 100%; display: grid; place-items: center; padding: 2rem; overflow: auto; }
+.auth-card { width: min(620px,100%); background: rgba(255,255,255,.94); border: 1px solid #dce7f2; border-radius: 24px; padding: clamp(1.4rem,4vw,2.4rem); box-shadow: 0 24px 80px rgba(14,51,84,.13); }
+.auth-brand { display: flex; align-items: center; gap: .8rem; margin-bottom: 1.5rem; }
+.auth-brand .brand-mark { width: 44px; height: 44px; border-radius: 12px; font-size: 1.4rem; }
+.auth-card h1 { font-size: 1.7rem; margin-bottom: .45rem; }
+.auth-card p { color: #64748b; margin-top: 0; }
+.auth-card .btn { width: 100%; margin-top: 1.15rem; }
+.auth-link { display: inline-block; margin-top: .75rem; cursor: pointer; }
+.connection-note { padding: .8rem 1rem; border-radius: 10px; background: #eff6ff; color: #1e40af; font-size: .83rem; }
+.empty-state { padding: 2.5rem 1.25rem; text-align: center; color: #64748b; }
+.empty-state h2 { margin-bottom: .35rem; font-size: 1.1rem; }
+.inline-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+.pill { display: inline-flex; border-radius: 999px; padding: .15rem .6rem; font-size: .75rem; background: #f1f5f9; color: #475569; }
+.pill.good { background: #d1fae5; color: #047857; }
+.pill.warn { background: #fef3c7; color: #b45309; }
+.pill.bad { background: #fee2e2; color: #b91c1c; }
+.screen-error { padding: 1rem; border: 1px solid #fecaca; border-radius: 12px; color: #991b1b; background: #fef2f2; }
+.line-editor { display: grid; grid-template-columns: minmax(180px,2fr) minmax(90px,1fr) minmax(90px,1fr) auto; gap: .5rem; align-items: end; margin-bottom: .6rem; }
+.permission-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .5rem; }
+.permission-list label { display: flex; gap: .5rem; align-items: center; font-size: .82rem; }
+.permission-editor { margin-top: 1rem; padding: 1rem; border: 1px solid #e2e8f0; border-radius: 12px; }
+.permission-toggle { display: flex; gap: .55rem; align-items: center; margin-bottom: .85rem; font-weight: 600; }
+.report-filters { align-items: end; }
+.offline-banner { margin: .6rem 1.3rem 0; }
+@media (max-width: 800px) { .form-grid { grid-template-columns: 1fr; } .form-grid .span-2 { grid-column: auto; } .line-editor { grid-template-columns: 1fr 1fr; } .permission-list { grid-template-columns: 1fr; } }
